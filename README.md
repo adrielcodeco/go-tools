@@ -698,6 +698,44 @@ For non-rueidis clients, the underlying `gscore.RegisterCloser` is
 public — use it directly to register any cleanup function that has a
 similar "blocking Close()" shape (Kafka, gRPC pools, etc.).
 
+### Tracing rueidis with Elastic APM
+
+There is no dedicated `apmrueidis` package — rueidis already publishes
+an official OTel adapter
+([`rueidisotel`](https://pkg.go.dev/github.com/redis/rueidis/rueidisotel)),
+and `apmcore.SetupOTelSDK` plants the APM agent as the OTel global
+`TracerProvider`/`MeterProvider`. Construct the client via `rueidisotel`
+and spans + metrics flow through APM automatically:
+
+```go
+import (
+    "github.com/redis/rueidis"
+    "github.com/redis/rueidis/rueidisotel"
+
+    "github.com/adrielcodeco/go-tools/apmcore"
+)
+
+func main() {
+    shutdown, _ := apmcore.SetupOTelSDK(context.Background())
+    defer shutdown(context.Background())
+
+    client, err := rueidisotel.NewClient(rueidis.ClientOption{
+        InitAddress: []string{"localhost:6379"},
+    })
+    // ... use client as usual; spans appear in Kibana → APM → Services.
+}
+```
+
+Notes:
+
+- `rueidisotel.NewClient` is the only way to get **pool-level metrics**
+  (it has to install its own `DialFn`). `rueidisotel.WithClient(existing)`
+  wraps an already-built client but only adds tracing — no pool metrics.
+- `apmcore.InstrumentRedis(client)` is for `redis/go-redis/v9` clients
+  (it uses `redisotel`). It does **not** apply to rueidis.
+- The `SetupOTelSDK` call must happen before `rueidisotel.NewClient`, so
+  the client picks up the APM-backed `TracerProvider`/`MeterProvider`.
+
 ---
 
 ## Elastic APM (`apmfiber` / `apmfiberv3`)
