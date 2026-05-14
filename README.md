@@ -7,6 +7,7 @@ A toolbox for production [Fiber](https://github.com/gofiber/fiber) + [GORM](http
 3. **`apmfiber` / `apmfiberv3`** — Elastic APM tracing for Fiber + GORM + outgoing HTTP + Redis: foldable DB spans, log↔trace correlation, transaction labels, error capture, and DB-pool metrics.
 4. **`gsrueidis`** — Rueidis adapter for the graceful-shutdown manager, with timeout-bounded close so a wedged Redis client cannot stall shutdown.
 5. **`httpclient`** — Generics-friendly fasthttp client wrapper with built-in APM tracing, pluggable structured-log hook, configurable retry, and sonic JSON.
+6. **`logcore` + `logfiber` / `logfiberv3`** — Structured zap logger pre-wired for APM (auto-error capture, trace.id correlation), with Fiber incoming middleware and an httpclient outgoing hook that share the same `req`/`res`/`responseTime` schema.
 
 **Module:** `github.com/adrielcodeco/go-tools`
 
@@ -801,6 +802,78 @@ httpclient.SetHook(func(r httpclient.Record) {
 `RetryPolicy.ShouldRetry` defaults to retrying transport errors and 5xx
 responses. Override for app-specific semantics (e.g. retry on 429, but
 not 401).
+
+---
+
+## Structured logging (`logcore` / `logfiber` / `logfiberv3`)
+
+A zap-based logger pre-wired for APM, plus middlewares that emit a
+consistent `incoming` / `outgoing` schema across the request lifecycle.
+
+```bash
+go get github.com/adrielcodeco/go-tools/logcore
+go get github.com/adrielcodeco/go-tools/logfiber       # Fiber v2
+# or
+go get github.com/adrielcodeco/go-tools/logfiberv3     # Fiber v3
+```
+
+### Bootstrap
+
+```go
+l, _ := logcore.New(logcore.Options{
+    Service:     "ledger",
+    Version:     "1.2.3",
+    Environment: "production",
+})
+logcore.SetGlobal(l)
+
+// Outgoing logs for httpclient.
+httpclient.SetHook(logcore.HTTPClientHook())
+```
+
+`logcore.New` wraps the zap core with `apmzap.Core` by default — any
+`logger.Error(...)` or `logger.Fatal(...)` call is auto-emitted as an
+APM error event in Kibana → APM → Errors. Disable with
+`Options{DisableAPMCore: true}` in tests.
+
+### Fiber middleware (incoming)
+
+```go
+app.Use(apmfiber.Middleware())          // first, so transactions exist
+app.Use(logfiber.Middleware(logfiber.Config{
+    // SkipPaths defaults to ["/live", "/ready", "/health"]
+}))
+```
+
+Every request produces one log line with the schema:
+
+```json
+{
+  "msg": "→ incoming → [POST] /charge - 200",
+  "trace.id": "…",
+  "transaction.id": "…",
+  "incoming": {
+    "req":  { "params": …, "queryString": …, "headers": …, "body": … },
+    "res":  { "headers": …, "body": …, "statusCode": "200" },
+    "responseTime": "12.4ms"
+  }
+}
+```
+
+The `httpclient.SetHook(logcore.HTTPClientHook())` emits the **same
+shape** under the `outgoing` key, so Kibana queries like
+`outgoing.res.body.id` match outbound calls and `incoming.req.body.id`
+match inbound — without separate dashboards per direction.
+
+### Trace correlation everywhere else
+
+For any non-middleware log call, use the global helpers so the trace
+fields are added automatically:
+
+```go
+logcore.LogCtx(ctx).Info("processed", zap.String("id", id))
+// → adds trace.id / transaction.id from the active APM span
+```
 
 ---
 
