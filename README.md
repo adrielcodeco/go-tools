@@ -6,6 +6,7 @@ A toolbox for production [Fiber](https://github.com/gofiber/fiber) + [GORM](http
 2. **`gsfiber` / `gsfiberv3`** — Kubernetes-aware graceful shutdown for Fiber + GORM + outbound calls, with ordered phases, hooks, readiness probe, and force-kill ceiling.
 3. **`apmfiber` / `apmfiberv3`** — Elastic APM tracing for Fiber + GORM + outgoing HTTP + Redis: foldable DB spans, log↔trace correlation, transaction labels, error capture, and DB-pool metrics.
 4. **`gsrueidis`** — Rueidis adapter for the graceful-shutdown manager, with timeout-bounded close so a wedged Redis client cannot stall shutdown.
+5. **`httpclient`** — Generics-friendly fasthttp client wrapper with built-in APM tracing, pluggable structured-log hook, configurable retry, and sonic JSON.
 
 **Module:** `github.com/adrielcodeco/go-tools`
 
@@ -735,6 +736,71 @@ Notes:
   (it uses `redisotel`). It does **not** apply to rueidis.
 - The `SetupOTelSDK` call must happen before `rueidisotel.NewClient`, so
   the client picks up the APM-backed `TracerProvider`/`MeterProvider`.
+
+---
+
+## HTTP client (`httpclient`)
+
+A small fasthttp-based client wrapper with generics, sonic JSON,
+configurable retry, and APM tracing already wired through `apmcore`.
+Each call produces an APM exit span (via `apmcore.TraceFastHTTPCall`)
+and propagates the active transaction's `traceparent` header.
+
+```bash
+go get github.com/adrielcodeco/go-tools/httpclient
+```
+
+```go
+type charge struct {
+    ID     string `json:"id"`
+    Amount int    `json:"amount"`
+}
+
+out, err := httpclient.POST[charge](ctx, httpclient.RequestOptions{
+    URL:     "https://api.example.com/charge",
+    Headers: httpclient.JSONHeaders(),
+    Data:    map[string]any{"amount": 100},
+    Retry: httpclient.RetryPolicy{
+        MaxAttempts:    3,
+        InitialBackoff: 100 * time.Millisecond,
+    },
+})
+```
+
+### Configuration
+
+```go
+// Override the underlying *fasthttp.Client (default has 30s read/write).
+httpclient.UseClient(&fasthttp.Client{ReadTimeout: 10 * time.Second})
+
+// Install a structured-log hook called once per attempt — even retries.
+httpclient.SetHook(func(r httpclient.Record) {
+    logger.LogCtx(r.Ctx).Info("← outgoing",
+        zap.String("method", r.Method),
+        zap.String("url", r.URL),
+        zap.Int("status", r.Status),
+        zap.Duration("rt", r.ResponseTime),
+        zap.Int("attempt", r.Attempt),
+        zap.Error(r.Err),
+    )
+})
+```
+
+### Error handling
+
+- Transport errors (DNS, connection refused, timeouts) are returned as-is.
+- HTTP status outside `[200, 300)` is returned as a `*httpclient.StatusError`
+  with `StatusCode` and the raw response `Body` preserved — callers can
+  inspect or decode partial responses even on failure.
+- `Request[O]` / `GET[O]` / etc. attempt to decode the body into `*O`
+  via sonic regardless of error; the returned error is the original
+  call error so retry logic still works.
+
+### Retry
+
+`RetryPolicy.ShouldRetry` defaults to retrying transport errors and 5xx
+responses. Override for app-specific semantics (e.g. retry on 429, but
+not 401).
 
 ---
 
