@@ -6,8 +6,11 @@ A toolbox for production [Fiber](https://github.com/gofiber/fiber) + [GORM](http
 2. **`gsfiber` / `gsfiberv3`** — Kubernetes-aware graceful shutdown for Fiber + GORM + outbound calls, with ordered phases, hooks, readiness probe, and force-kill ceiling.
 3. **`apmfiber` / `apmfiberv3`** — Elastic APM tracing for Fiber + GORM + outgoing HTTP + Redis: foldable DB spans, log↔trace correlation, transaction labels, error capture, and DB-pool metrics.
 4. **`gsrueidis`** — Rueidis adapter for the graceful-shutdown manager, with timeout-bounded close so a wedged Redis client cannot stall shutdown.
-5. **`httpclient`** — Generics-friendly fasthttp client wrapper with built-in APM tracing, pluggable structured-log hook, configurable retry, and sonic JSON.
-6. **`logcore` + `logfiber` / `logfiberv3`** — Structured zap logger pre-wired for APM (auto-error capture, trace.id correlation), with Fiber incoming middleware and an httpclient outgoing hook that share the same `req`/`res`/`responseTime` schema.
+5. **`gsredis`** — go-redis/v9 adapter for the graceful-shutdown manager, analogous to gsrueidis.
+6. **`httpclient`** — Generics-friendly fasthttp client wrapper with built-in APM tracing, pluggable structured-log hook, configurable retry, and sonic JSON.
+7. **`logcore` + `logfiber` / `logfiberv3`** — Structured zap logger pre-wired for APM (auto-error capture, trace.id correlation), with Fiber incoming middleware and an httpclient outgoing hook that share the same `req`/`res`/`responseTime` schema.
+8. **`gormautobatch`** — GORM plugin that transparently batches Create/Update/Delete operations based on measured P95 latency, reducing round-trips under load with per-op SAVEPOINT isolation.
+9. **`setup`** — One-call bootstrap that wires the gscore Manager, Fiber app, GORM, APM, logger, httpclient, gsredis, and gsrueidis together in the correct order. Recommended for production services.
 
 **Module:** `github.com/adrielcodeco/go-tools`
 
@@ -23,6 +26,16 @@ Each trio shares a framework-agnostic engine (`txcore`, `gscore`, `apmcore`) so 
 
 ## Table of Contents
 
+- [Quick Setup (`setup`)](#quick-setup-setup)
+- [Module integration map](#module-integration-map)
+  - [Dependency graph](#dependency-graph)
+  - [APM + txctx: span parenting](#apm--txctx-span-parenting)
+  - [APM + gormautobatch: batch spans](#apm--gormautobatch-batch-spans)
+  - [APM + logcore: trace correlation](#apm--logcore-trace-correlation)
+  - [APM + httpclient: exit spans + outgoing logs](#apm--httpclient-exit-spans--outgoing-logs)
+  - [gscore + everything: graceful shutdown registration order](#gscore--everything-graceful-shutdown-registration-order)
+  - [gsredis / gsrueidis: which one to use](#gsredis--gsrueidis-which-one-to-use)
+  - [logcore + gscore: logger lifecycle](#logcore--gscore-logger-lifecycle)
 - [Transactions (`txctx` / `txctxv3`)](#transactions-txctx--txctxv3)
   - [Features](#features)
   - [Installation](#installation)
@@ -37,13 +50,230 @@ Each trio shares a framework-agnostic engine (`txcore`, `gscore`, `apmcore`) so 
   - [Phases](#phases)
   - [Usage](#usage-1)
   - [Kubernetes integration](#kubernetes-integration)
+- [Rueidis graceful shutdown (`gsrueidis`)](#rueidis-gsrueidis)
+- [Redis graceful shutdown (`gsredis`)](#redis-graceful-shutdown-gsredis)
+- [GORM Auto-batch (`gormautobatch`)](#gorm-auto-batch-gormautobatch)
 - [Elastic APM (`apmfiber` / `apmfiberv3`)](#elastic-apm-apmfiber--apmfiberv3)
   - [Packages](#packages)
   - [Features](#features-2)
   - [Installation](#installation-2)
   - [Quick start (Fiber v2)](#quick-start-fiber-v2)
+  - [Manager integration](#manager-integration)
+  - [APM transaction context in txctx](#apm-transaction-context-in-txctx)
   - [Local stack](#local-stack)
   - [Pitfall index](#pitfall-index)
+- [HTTP client (`httpclient`)](#http-client-httpclient)
+- [Structured logging (`logcore` / `logfiber` / `logfiberv3`)](#structured-logging-logcore--logfiber--logfiberv3)
+
+---
+
+## Quick Setup (`setup`)
+
+The `setup` package wires the full standard stack in one call with the correct
+registration order, eliminating the manual "register everything in the right
+order" ceremony. It is the recommended way to bootstrap a production service.
+
+```bash
+go get github.com/adrielcodeco/go-tools/setup
+```
+
+```go
+func main() {
+    ctx := context.Background()
+    db := openGORM()
+    app := fiber.New()
+
+    mgr := gscore.New(gscore.Config{
+        PreStopDelay:   5 * time.Second,
+        DrainTimeout:   25 * time.Second,
+        DBCloseTimeout: 5 * time.Second,
+        ForceKillAfter: 55 * time.Second,
+    })
+
+    result, err := setup.New().
+        WithLogger(logcore.Options{Service: "my-service", Version: "1.0.0"}).
+        WithOTel(ctx).
+        WithGORM(db).
+        WithFiberV2(app).
+        WithHTTPClientLogging().
+        Build(mgr)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer result.Shutdown(ctx)
+
+    registerRoutes(app)
+    app.Get("/healthz/ready", gsfiber.ReadinessHandler(mgr))
+
+    go app.Listen(":8080")
+    mgr.ListenAndWait()
+}
+```
+
+`Build` performs all registrations in a fixed, safe order:
+
+1. Register Fiber app with the Manager
+2. `apmcore.SetupOTelSDK` — OTel/APM bootstrap
+3. `logcore.New` + `logcore.SetGlobal` — structured logger
+4. Install the GORM APM plugin (`apmcore.NewGormPlugin`)
+5. `mgr.RegisterDB` — GORM pool close during `PhaseDB`
+6. `txcore.RegisterWithManager` — drain in-flight transactions before DB closes
+7. `apmcore.RegisterDBPoolMetricsWithManager` — deregister pool metric gatherer at shutdown
+8. `autobatch.RegisterWithManager` (if `WithAutobatch`/`WithAutobatchConfig` set)
+9. go-redis closers + optional OTel instrumentation (if `WithRedis`)
+10. rueidis closers + optional OTel wrapping (if `WithRueidis`)
+11. `apmcore.RegisterWithManager` — flush OTel spans/metrics at `PhasePostDB`
+12. `logcore.RegisterGlobalWithManager` — flush zap buffers last
+
+### Builder API
+
+```go
+setup.New().
+    WithLogger(logcore.Options{...}).          // create + set global logger
+    WithOTel(ctx).                             // call SetupOTelSDK
+    WithGORM(db).                              // register GORM plugin, DB close, txcore
+    WithAutobatchConfig(autobatch.Config{...}). // create + register autobatch plugin
+    WithAutobatch(existingPlugin).             // register a pre-built autobatch plugin
+    WithRedis(client, "redis-cache").          // go-redis closer + OTel instrumentation
+    WithRueidis(client, "redis-pubsub").       // rueidis closer + OTel wrapping
+    WithFiberV2(app).                          // register Fiber v2 app for drain
+    WithFiberV3(app).                          // register Fiber v3 app for drain
+    WithHTTPClientLogging().                   // install logcore hook on httpclient
+    Build(mgr)                                 // wire everything; returns *Result, error
+```
+
+`Result.Logger` is the `*logcore.Logger` created by `WithLogger` (nil if not
+set). `Result.Shutdown` is the OTel shutdown function from `SetupOTelSDK`.
+
+When `WithOTel` and `WithAutobatchConfig` are both set, `Build` automatically
+injects `cfg.SpanEmitter = apmcore.BatchSpanEmitter()` so batched writes appear
+as APM spans without any extra configuration.
+
+---
+
+## Module integration map
+
+Every module in this toolbox is independently importable, but they are designed
+to compose. This section shows how they connect and what order matters.
+
+### Dependency graph
+
+```
+                        ┌─────────────────────────────────────────────────┐
+                        │                   setup                         │
+                        │  (wires everything below in the correct order)  │
+                        └───────────────────┬─────────────────────────────┘
+                                            │
+          ┌─────────────┬──────────────────┼──────────────────┬───────────────┐
+          ▼             ▼                  ▼                  ▼               ▼
+      gsfiber/      apmfiber/          logfiber/          txctx/          gsredis/
+     gsfiberv3    apmfiberv3          logfiberv3         txctxv3         gsrueidis
+          │             │                  │                  │
+          ▼             ▼                  ▼                  ▼
+       gscore        apmcore           logcore            txcore
+          │             │                  │                  │
+          └─────────────┴──────────────────┴──────────────────┘
+                                    │
+                              go-tools (root)
+                         gscore.CloserRegistrar,
+                          txctx.ContextExtractor, …
+```
+
+### Connection points between modules
+
+#### APM + txctx: span parenting
+
+`apmfiber.Middleware()` attaches the APM transaction to the underlying
+`*fasthttp.RequestCtx`. `txctx.Middleware()` derives its internal context from
+`context.Background()` by default, which breaks span nesting — DB spans created
+inside handlers end up as root spans in Kibana instead of children of the
+request transaction.
+
+Fix: pass `apmfiber.TxContextExtractor()` to `txctx.Middleware` so it inherits
+the request context that already carries the APM transaction:
+
+```go
+app.Use(apmfiber.Middleware())   // must be first
+app.Use(txctx.Middleware(db, txctx.Config{...}, apmfiber.TxContextExtractor()))
+```
+
+This is wired automatically when using the `setup` package.
+
+#### APM + gormautobatch: batch spans
+
+`gormautobatch` can emit an APM span per flush via its `Config.SpanEmitter`
+field. `apmcore.BatchSpanEmitter()` returns the right function:
+
+```go
+plugin := autobatch.New(autobatch.Config{
+    SpanEmitter: apmcore.BatchSpanEmitter(),
+})
+```
+
+When using `setup.New().WithOTel(ctx).WithAutobatchConfig(cfg)`, this wiring
+is automatic — `Build` injects `BatchSpanEmitter` before registering the
+plugin.
+
+#### APM + logcore: trace correlation
+
+`logcore.New` wraps the zap core with `apmzap.Core` by default. Any
+`logger.Error(...)` call is automatically emitted as an APM error event, and
+`logcore.LogCtx(ctx)` appends `trace.id` / `transaction.id` fields to every
+log line. No extra setup needed — the correlation is active as long as
+`apmcore.SetupOTelSDK` was called before `logcore.New`.
+
+#### APM + httpclient: exit spans + outgoing logs
+
+`httpclient` produces an APM exit span for every call via
+`apmcore.TraceFastHTTPCall` internally. It also propagates the active
+transaction's `traceparent` header so downstream services appear as children in
+the APM trace waterfall.
+
+To add structured logging on top, install the logcore hook:
+
+```go
+httpclient.SetHook(logcore.HTTPClientHook())
+```
+
+Both concerns are enabled by `setup.New().WithOTel(ctx).WithHTTPClientLogging()`.
+
+#### gscore + everything: graceful shutdown registration order
+
+The shutdown sequence is ordered. Registering in the wrong phase causes
+resources to be torn down before dependents have finished:
+
+| Phase | What to register |
+|---|---|
+| `PhasePreStop` | In-memory queue flushes, worker signals |
+| `PhaseDrain` | Fiber app drain (automatic via `gsfiber.RegisterApp`) |
+| `PhasePostDrain` | `txcore.RegisterWithManager` — wait for in-flight transactions |
+| `PhaseDB` | `mgr.RegisterDB(db)` — close GORM pool |
+| `PhasePostDB` | `gsredis`, `gsrueidis`, `apmcore.RegisterWithManager`, `logcore.RegisterGlobalWithManager` |
+
+`setup.Build` follows this order exactly. If you wire manually, register in the
+order shown above — particularly, do **not** close Redis before transactions
+finish, and do **not** flush the logger before OTel spans are exported.
+
+#### gsredis / gsrueidis: which one to use
+
+Use `gsredis` for `go-redis/v9` clients and `gsrueidis` for `rueidis` clients.
+Both register a timeout-bounded closer at `PhasePostDB`. They are independent —
+a service can register both if it uses both clients.
+
+For APM tracing:
+- `go-redis/v9`: call `apmcore.InstrumentRedis(client)` after `SetupOTelSDK`.
+- `rueidis`: build the client via `rueidisotel.NewClient` (preferred, adds pool
+  metrics) or wrap an existing one with `apmcore.InstrumentRueidis(client)`.
+
+`gsredis.InstrumentAndRegister` and `gsrueidis` combine the OTel instrumentation
+and shutdown registration in one call.
+
+#### logcore + gscore: logger lifecycle
+
+The zap logger buffers internally. At shutdown, `logcore.RegisterGlobalWithManager`
+registers a `PhasePostDB` closer that calls `logger.Sync()` — ensuring buffered
+log lines are flushed after OTel spans (which may themselves log) are exported.
+The ordering matters: register `apmcore` before `logcore`.
 
 ---
 
@@ -740,6 +970,115 @@ Notes:
 
 ---
 
+## Redis graceful shutdown (`gsredis`)
+
+The `gsredis` package is the [go-redis/v9](https://github.com/redis/go-redis)
+`UniversalClient` analog of `gsrueidis`. It registers `client.Close()` as a
+context-aware closer on the Manager, bounded by a per-client timeout so a slow
+Redis pool cannot stall the shutdown sequence.
+
+```bash
+go get github.com/adrielcodeco/go-tools/gsredis
+```
+
+```go
+// Register for graceful shutdown (Close bounded by timeout).
+gsredis.Register(client, mgr, gscore.PhasePostDB, 5*time.Second)
+
+// Register + instrument with OTel tracing and metrics in one call.
+if err := gsredis.InstrumentAndRegister(client, mgr, gscore.PhasePostDB, 5*time.Second); err != nil {
+    // instrumentation failed; tracing is best-effort — client is still registered.
+    log.Printf("redis instrumentation: %v", err)
+}
+```
+
+- `timeout=0` falls back to `gsredis.DefaultTimeout` (5s).
+- If `Close()` does not return within the timeout the registered closer
+  returns `gsredis.ErrCloseTimedOut`. The Manager logs it and continues.
+- `InstrumentAndRegister` calls `apmcore.InstrumentRedis(client)` before
+  registering the closer. Call `apmcore.SetupOTelSDK` first so the client
+  picks up the APM-backed `TracerProvider`.
+- `PhasePostDB` is recommended for the same reason as `gsrueidis`: any
+  `txctx.OnCommit` callbacks that write to Redis will have completed by then.
+
+---
+
+## GORM Auto-batch (`gormautobatch`)
+
+A GORM plugin that transparently switches between individual and batched
+database operations based on measured P95 write latency. When latency exceeds
+the configured threshold, `Create`/`Updates`/`Delete` calls are buffered and
+flushed as a single transaction, reducing round-trips under load. When latency
+drops back, operations pass through normally with no overhead.
+
+```bash
+go get github.com/adrielcodeco/go-tools/gormautobatch
+```
+
+```go
+import autobatch "github.com/adrielcodeco/go-tools/gormautobatch"
+
+threshold := 50 * time.Millisecond
+p := autobatch.New(autobatch.Config{
+    LatencyThreshold: &threshold,            // nil = disabled; 0 = always batch; >0 = adaptive
+    FlushTimeout:     10 * time.Millisecond, // flush batch after 10ms idle
+    MaxBatchSize:     100,                   // or when 100 ops are buffered
+    WindowDuration:   30 * time.Second,      // P95 measured over last 30s
+})
+if err := db.Use(p); err != nil {
+    log.Fatal(err)
+}
+defer p.Close() // drain in-flight batches before exit
+```
+
+Regular GORM calls are unchanged — the plugin decides whether to batch
+transparently. `db.Create(&u)`, `db.Model(&u).Updates(&payload)`, and
+`db.Delete(&r)` all participate. `Find`/`First` are never buffered.
+
+### Batch semantics
+
+All operations in a batch run inside a single transaction. Each individual
+operation is wrapped in its own `SAVEPOINT`, so a per-op failure (e.g. a
+unique-constraint violation) is isolated: only the failing caller sees the
+error, and the rest of the batch still commits. Callers block synchronously
+until their batch is flushed — from the caller's perspective it looks like a
+normal GORM call.
+
+Operations inside `db.Transaction(...)` or `db.Begin()` are never batched —
+they run inline on the user's transaction to preserve atomicity.
+
+### Graceful shutdown integration
+
+Register the plugin with the Manager so in-flight batches are drained before
+the DB pool closes:
+
+```go
+autobatch.RegisterWithManager(p, mgr, int(gscore.PhasePostDrain), 30*time.Second)
+```
+
+Or let `setup.New().WithAutobatchConfig(cfg).Build(mgr)` handle this
+automatically.
+
+### APM tracing
+
+When `WithOTel` is set in the `setup` builder, batched flush transactions
+automatically appear as APM spans via `apmcore.BatchSpanEmitter()`. To wire
+this manually:
+
+```go
+cfg.SpanEmitter = apmcore.BatchSpanEmitter()
+p := autobatch.New(cfg)
+```
+
+### DBResolver compatibility
+
+DBResolver must be registered before autobatch. Multi-source (sharded) primary
+configurations are not supported — batched writes are routed to the pool
+selected at `BEGIN` time. Single-primary + read-replica setups are fully
+supported.
+
+---
+
 ## HTTP client (`httpclient`)
 
 A small fasthttp-based client wrapper with generics, sonic JSON,
@@ -875,6 +1214,38 @@ logcore.LogCtx(ctx).Info("processed", zap.String("id", id))
 // → adds trace.id / transaction.id from the active APM span
 ```
 
+### Graceful shutdown integration
+
+Register the logger's `Sync()` as a shutdown closer so buffered log lines are
+flushed before the process exits. Register this last — after all other closers —
+so shutdown log lines from every earlier phase are not lost:
+
+```go
+// On a specific logger instance:
+l.RegisterWithManager(mgr, int(gscore.PhasePostDB), 0)
+
+// Or using the global logger:
+logcore.RegisterGlobalWithManager(mgr, int(gscore.PhasePostDB), 0)
+```
+
+`phase=0` defaults to `PhasePostDB`; `timeout=0` defaults to 5s. The `setup`
+builder calls `logcore.RegisterGlobalWithManager` automatically as the last step
+of `Build`.
+
+### gscore.Logger adapter
+
+`logcore.GSCoreGlobalLogger()` returns a value that satisfies `gscore.Logger`
+(the three-method `Info`/`Warn`/`Error` interface), backed by the global zap
+logger. Pass it to `gscore.Config.Logger` so shutdown phase events are emitted
+through the same structured logger as the rest of the application:
+
+```go
+mgr := gscore.New(gscore.Config{
+    Logger: logcore.GSCoreGlobalLogger(),
+    // ...
+})
+```
+
 ---
 
 ## Elastic APM (`apmfiber` / `apmfiberv3`)
@@ -952,6 +1323,65 @@ func main() {
     _ = shutdown(context.Background())
 }
 ```
+
+### Manager integration
+
+`apmcore` ships two helpers for registering shutdown actions with the
+graceful-shutdown Manager without importing `gscore` directly:
+
+```go
+shutdown, err := apmcore.SetupOTelSDK(ctx)
+
+// Flush OTel spans and metrics after the DB pool closes.
+apmcore.RegisterWithManager(shutdown, mgr, int(gscore.PhasePostDB), 0)
+
+// Deregister the DB-pool metrics gatherer (avoids a zeroed-metrics tick
+// after the pool closes). Call after mgr.RegisterDB(db).
+sqlDB, _ := db.DB()
+apmcore.RegisterDBPoolMetricsWithManager(sqlDB, mgr, int(gscore.PhasePostDB), 0)
+```
+
+Both helpers accept `phase=0` to default to `PhasePostDB` and `timeout=0` to
+use the built-in defaults (15s for the OTel shutdown; 5s for pool metrics).
+
+#### InstrumentRueidis
+
+`apmcore.InstrumentRueidis(client)` wraps a rueidis client with the OTel
+`rueidisotel` adapter in a single call. Use it when you already hold a
+`rueidis.Client` and want to add tracing without rebuilding the client:
+
+```go
+// SetupOTelSDK must have been called first.
+tracedClient := apmcore.InstrumentRueidis(existingClient)
+```
+
+For new clients, prefer `rueidisotel.NewClient` directly so pool-level metrics
+are also captured (see [Tracing rueidis with Elastic APM](#tracing-rueidis-with-elastic-apm)).
+
+### APM transaction context in txctx
+
+When `apmfiber.Middleware()` and `txctx.Middleware()` are both in the chain, the
+txctx middleware must inherit the APM transaction from the Fiber request context,
+not from `context.Background()`. Pass `apmfiber.TxContextExtractor()` as the
+third argument to `txctx.Middleware`:
+
+```go
+// Fiber v2
+app.Use(apmfiber.Middleware())   // must be first
+app.Use(txctx.Middleware(db, txctx.Config{Timeout: 5 * time.Second},
+    apmfiber.TxContextExtractor()))
+```
+
+```go
+// Fiber v3
+app.Use(apmfiberv3.Middleware())
+app.Use(txctxv3.Middleware(db, txctxv3.Config{Timeout: 5 * time.Second},
+    apmfiberv3.TxContextExtractor()))
+```
+
+Without the extractor, the transaction context would be derived from
+`context.Background()` and the DB spans created inside handlers would not be
+nested under the request's APM transaction.
 
 ### Local stack
 
