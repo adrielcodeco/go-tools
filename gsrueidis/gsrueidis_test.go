@@ -1,6 +1,7 @@
 package gsrueidis_test
 
 import (
+	"context"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -9,6 +10,21 @@ import (
 	"github.com/adrielcodeco/go-tools/gscore"
 	"github.com/adrielcodeco/go-tools/gsrueidis"
 )
+
+// fakeRegistrar implements gsrueidis.CloserRegistrar without using *gscore.Manager.
+type fakeRegistrar struct {
+	name    string
+	phase   int
+	timeout time.Duration
+	fn      func(ctx context.Context) error
+}
+
+func (r *fakeRegistrar) RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error) {
+	r.name = name
+	r.phase = phase
+	r.timeout = timeout
+	r.fn = fn
+}
 
 type fakeClient struct {
 	called atomic.Int32
@@ -76,5 +92,37 @@ func TestRegisterZeroTimeoutFallsBackToDefault(t *testing.T) {
 	_ = m.Wait()
 	if c.called.Load() != 1 {
 		t.Fatalf("expected close to be invoked once")
+	}
+}
+
+// TestRegister_UsesInterface verifies that Register works with any CloserRegistrar,
+// not just *gscore.Manager. This tests the LC-3 interface change.
+func TestRegister_UsesInterface(t *testing.T) {
+	reg := &fakeRegistrar{}
+	c := &fakeClient{}
+
+	gsrueidis.Register(reg, "test-redis", c, gscore.PhasePostDB, 100*time.Millisecond)
+
+	if reg.name != "test-redis" {
+		t.Errorf("expected name %q, got %q", "test-redis", reg.name)
+	}
+	if reg.phase != int(gscore.PhasePostDB) {
+		t.Errorf("expected phase %d, got %d", int(gscore.PhasePostDB), reg.phase)
+	}
+	if reg.timeout != 100*time.Millisecond {
+		t.Errorf("expected timeout 100ms, got %v", reg.timeout)
+	}
+	if reg.fn == nil {
+		t.Fatal("expected closer fn to be registered")
+	}
+
+	// Invoke the closer and verify client.Close() is called.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := reg.fn(ctx); err != nil {
+		t.Fatalf("closer fn returned error: %v", err)
+	}
+	if c.called.Load() != 1 {
+		t.Errorf("expected Close called once, got %d", c.called.Load())
 	}
 }

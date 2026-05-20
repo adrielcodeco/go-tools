@@ -572,6 +572,61 @@ func TestHookFor_NilLogger_RoutesToGlobal(t *testing.T) {
 	}
 }
 
+func TestHookFor_ReqHeadersPopulated(t *testing.T) {
+	core, observed := observer.New(zapcore.InfoLevel)
+	l := &logcore.Logger{Logger: zap.New(core)}
+
+	hook := logcore.HookFor(l)
+	hook(httpclient.Record{
+		Ctx:    context.Background(),
+		Method: "POST",
+		URL:    "https://api.example.com/charge",
+		Status: 200,
+		ReqHeaders: map[string]string{
+			"Content-Type":  "application/json",
+			"Authorization": "Bearer tok",
+			"X-Request-ID":  "req-123",
+		},
+		ReqBody:      []byte(`{"amount":100}`),
+		ResponseTime: 10 * time.Millisecond,
+		Attempt:      1,
+	})
+
+	if observed.Len() != 1 {
+		t.Fatalf("expected 1 log entry, got %d", observed.Len())
+	}
+
+	out := findOutgoing(observed.AllUntimed()[0].Context)
+	if out == nil {
+		t.Fatal("expected outgoing field in log entry")
+	}
+	if out.Req == nil {
+		t.Fatal("expected outgoing.Req to be non-nil")
+	}
+	if out.Req.Headers == nil {
+		t.Fatal("expected outgoing.Req.Headers to be populated")
+	}
+	headers, ok := out.Req.Headers.(map[string]string)
+	if !ok {
+		t.Fatalf("expected outgoing.Req.Headers to be map[string]string, got %T", out.Req.Headers)
+	}
+	wantHeaders := map[string]string{
+		"Content-Type":  "application/json",
+		"Authorization": "Bearer tok",
+		"X-Request-ID":  "req-123",
+	}
+	for k, want := range wantHeaders {
+		got, ok := headers[k]
+		if !ok {
+			t.Errorf("outgoing.Req.Headers missing key %q", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("outgoing.Req.Headers[%q] = %q, want %q", k, got, want)
+		}
+	}
+}
+
 func TestHookFor_NilResponse_StatusOmega(t *testing.T) {
 	core, observed := observer.New(zapcore.InfoLevel)
 	l := &logcore.Logger{Logger: zap.New(core)}

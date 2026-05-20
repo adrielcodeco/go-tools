@@ -726,6 +726,52 @@ func TestDo_CancelledContextEmitsHook(t *testing.T) {
 	}
 }
 
+// --- Fix OBS-3: ResHeaders populated in hook record ----------------------
+
+func TestDo_ResHeadersInRecord(t *testing.T) {
+	httpclient.SetHook(nil)
+	defer httpclient.SetHook(nil)
+
+	var hookRecord httpclient.Record
+	httpclient.SetHook(func(r httpclient.Record) {
+		hookRecord = r
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Response-ID", "resp-42")
+		w.Header().Set("X-Custom-Header", "custom-value")
+		fmt.Fprintln(w, `{}`)
+	}))
+	defer srv.Close()
+
+	_, err := httpclient.Do(context.Background(), "GET", httpclient.RequestOptions{
+		URL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	if hookRecord.ResHeaders == nil {
+		t.Fatal("expected Record.ResHeaders to be non-nil")
+	}
+	wantHeaders := map[string]string{
+		"X-Response-Id":   "resp-42",
+		"X-Custom-Header": "custom-value",
+	}
+	for k, want := range wantHeaders {
+		got, ok := hookRecord.ResHeaders[k]
+		if !ok {
+			// Try original casing as net/http normalizes headers
+			t.Logf("Record.ResHeaders keys: %v", hookRecord.ResHeaders)
+			t.Errorf("Record.ResHeaders missing key %q", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("Record.ResHeaders[%q] = %q, want %q", k, got, want)
+		}
+	}
+}
+
 // --- Fix D3: ReqHeaders populated in hook record -------------------------
 
 func TestDo_ReqHeadersInRecord(t *testing.T) {
@@ -769,5 +815,40 @@ func TestDo_ReqHeadersInRecord(t *testing.T) {
 		if got != want {
 			t.Errorf("Record.ReqHeaders[%q] = %q, want %q", k, got, want)
 		}
+	}
+}
+
+// --- COR-1: RetryExhausted flag -------------------------------------------
+
+func TestDo_RetryExhaustedFlag(t *testing.T) {
+	httpclient.SetHook(nil)
+	defer httpclient.SetHook(nil)
+
+	var records []httpclient.Record
+	httpclient.SetHook(func(r httpclient.Record) {
+		records = append(records, r)
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, _ = httpclient.Do(context.Background(), "GET", httpclient.RequestOptions{
+		URL: srv.URL,
+		Retry: httpclient.RetryPolicy{
+			MaxAttempts:    2,
+			InitialBackoff: time.Millisecond,
+		},
+	})
+
+	if len(records) != 2 {
+		t.Fatalf("expected 2 hook records, got %d", len(records))
+	}
+	if records[0].RetryExhausted {
+		t.Error("first attempt should not have RetryExhausted set")
+	}
+	if !records[1].RetryExhausted {
+		t.Errorf("final attempt should have RetryExhausted = true, got false")
 	}
 }

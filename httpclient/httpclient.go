@@ -86,9 +86,10 @@ type Record struct {
 	ReqHeaders   map[string]string
 	ReqBody      []byte // bytes that hit the wire (already JSON or form-encoded)
 	ResHeaders   map[string]string
-	ResBody      []byte
-	Err          error
-	Attempt      int // 1-based; >1 means this is a retry
+	ResBody         []byte
+	Err             error
+	Attempt         int  // 1-based; >1 means this is a retry
+	RetryExhausted  bool // true on the final attempt when retries are exhausted due to a retryable failure
 }
 
 // Hook is invoked once per attempt — including retried ones — right
@@ -197,6 +198,18 @@ func FormHeaders() map[string]string {
 
 // --- low-level call ---------------------------------------------------
 
+// attemptResult holds the data produced by a single HTTP attempt, used by
+// the retry loop to emit the hook record after determining retryExhausted.
+type attemptResult struct {
+	finalURL   string
+	reqBody    []byte
+	respBody   []byte
+	resHeaders map[string]string
+	status     int
+	elapsed    time.Duration
+	err        error
+}
+
 // Do executes a single fasthttp call described by opts. Returns the raw
 // response body and an error. Status codes outside [200, 300) produce
 // a non-nil error but the body is still returned.
@@ -205,7 +218,9 @@ func FormHeaders() map[string]string {
 // and the configured Hook is invoked once per attempt.
 func Do(ctx context.Context, method string, opts RequestOptions) ([]byte, error) {
 	if opts.Retry.MaxAttempts <= 1 {
-		return doOnce(ctx, method, opts, 1)
+		res := doOnceRaw(ctx, method, opts, 1)
+		emitHookResult(ctx, method, opts.URL, opts.Headers, res, 1, false)
+		return res.respBody, res.err
 	}
 
 	mult := opts.Retry.Multiplier
@@ -218,22 +233,20 @@ func Do(ctx context.Context, method string, opts RequestOptions) ([]byte, error)
 		shouldRetry = defaultShouldRetry
 	}
 
-	var (
-		body []byte
-		err  error
-	)
 	for attempt := 1; attempt <= opts.Retry.MaxAttempts; attempt++ {
-		body, err = doOnce(ctx, method, opts, attempt)
-		status := 0
-		if err != nil {
-			if se, ok := err.(*StatusError); ok {
-				status = se.StatusCode
+		res := doOnceRaw(ctx, method, opts, attempt)
+		status := res.status
+		if res.err != nil {
+			if _, ok := res.err.(*StatusError); !ok {
+				status = 0 // transport error — no HTTP status
 			}
-		} else {
-			status = 200
 		}
-		if !shouldRetry(status, err) || attempt == opts.Retry.MaxAttempts {
-			return body, err
+		retryable := shouldRetry(status, res.err)
+		isLast := attempt == opts.Retry.MaxAttempts
+		retryExhausted := retryable && isLast
+		emitHookResult(ctx, method, opts.URL, opts.Headers, res, attempt, retryExhausted)
+		if !retryable || isLast {
+			return res.respBody, res.err
 		}
 		if backoff > 0 {
 			t := time.NewTimer(backoff)
@@ -242,13 +255,13 @@ func Do(ctx context.Context, method string, opts RequestOptions) ([]byte, error)
 			case <-ctx.Done():
 				t.Stop()
 				ctxErr := ctx.Err()
-				emitHook(ctx, method, opts.URL, opts.Headers, nil, nil, 0, 0, ctxErr, attempt)
-				return body, ctxErr
+				emitHook(ctx, method, opts.URL, opts.Headers, nil, nil, nil, 0, 0, ctxErr, attempt)
+				return res.respBody, ctxErr
 			}
 		}
 		backoff = nextBackoff(backoff, mult, opts.Retry.MaxBackoff)
 	}
-	return body, err
+	panic("unreachable")
 }
 
 func nextBackoff(cur time.Duration, mult float64, max time.Duration) time.Duration {
@@ -284,7 +297,9 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("httpclient: %s %s → %d", e.Method, e.URL, e.StatusCode)
 }
 
-func doOnce(ctx context.Context, method string, opts RequestOptions, attempt int) ([]byte, error) {
+// doOnceRaw executes a single HTTP attempt and returns all relevant data.
+// It does NOT emit the hook — the caller is responsible for that.
+func doOnceRaw(ctx context.Context, method string, opts RequestOptions, attempt int) attemptResult {
 	req := fasthttp.AcquireRequest()
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(req)
@@ -292,16 +307,14 @@ func doOnce(ctx context.Context, method string, opts RequestOptions, attempt int
 
 	finalURL, err := formatURL(opts.URL, opts.QueryString)
 	if err != nil {
-		emitHook(ctx, method, opts.URL, opts.Headers, nil, nil, 0, 0, err, attempt)
-		return nil, err
+		return attemptResult{finalURL: opts.URL, err: err}
 	}
 	req.SetRequestURI(finalURL)
 	req.Header.SetMethod(method)
 
 	body, err := encodeBody(opts.Data, opts.Headers)
 	if err != nil {
-		emitHook(ctx, method, finalURL, opts.Headers, nil, nil, 0, 0, err, attempt)
-		return nil, err
+		return attemptResult{finalURL: finalURL, err: err}
 	}
 	if body != nil {
 		req.SetBody(body)
@@ -327,37 +340,54 @@ func doOnce(ctx context.Context, method string, opts RequestOptions, attempt int
 	respBody := append([]byte(nil), resp.Body()...) // copy, fasthttp reuses the buffer
 	status := resp.StatusCode()
 
+	resHeaders := make(map[string]string)
+	resp.Header.VisitAll(func(k, v []byte) {
+		resHeaders[string(k)] = string(v)
+	})
+
 	if callErr != nil {
-		emitHook(ctx, method, finalURL, opts.Headers, body, respBody, status, elapsed, callErr, attempt)
-		return respBody, callErr
+		return attemptResult{finalURL: finalURL, reqBody: body, respBody: respBody, resHeaders: resHeaders, status: status, elapsed: elapsed, err: callErr}
 	}
 
 	if status < 200 || status >= 300 {
 		se := &StatusError{Method: method, URL: finalURL, StatusCode: status, Body: respBody}
-		emitHook(ctx, method, finalURL, opts.Headers, body, respBody, status, elapsed, se, attempt)
-		return respBody, se
+		return attemptResult{finalURL: finalURL, reqBody: body, respBody: respBody, resHeaders: resHeaders, status: status, elapsed: elapsed, err: se}
 	}
 
-	emitHook(ctx, method, finalURL, opts.Headers, body, respBody, status, elapsed, nil, attempt)
-	return respBody, nil
+	return attemptResult{finalURL: finalURL, reqBody: body, respBody: respBody, resHeaders: resHeaders, status: status, elapsed: elapsed}
 }
 
-func emitHook(ctx context.Context, method, urlStr string, reqHeaders map[string]string, reqBody, resBody []byte, status int, dur time.Duration, err error, attempt int) {
+// emitHookResult emits the hook using data from an attemptResult.
+func emitHookResult(ctx context.Context, method, fallbackURL string, reqHeaders map[string]string, res attemptResult, attempt int, retryExhausted bool) {
+	urlStr := res.finalURL
+	if urlStr == "" {
+		urlStr = fallbackURL
+	}
+	emitHookFull(ctx, method, urlStr, reqHeaders, res.resHeaders, res.reqBody, res.respBody, res.status, res.elapsed, res.err, attempt, retryExhausted)
+}
+
+func emitHook(ctx context.Context, method, urlStr string, reqHeaders, resHeaders map[string]string, reqBody, resBody []byte, status int, dur time.Duration, err error, attempt int) {
+	emitHookFull(ctx, method, urlStr, reqHeaders, resHeaders, reqBody, resBody, status, dur, err, attempt, false)
+}
+
+func emitHookFull(ctx context.Context, method, urlStr string, reqHeaders, resHeaders map[string]string, reqBody, resBody []byte, status int, dur time.Duration, err error, attempt int, retryExhausted bool) {
 	h := currentHook()
 	if h == nil {
 		return
 	}
 	h(Record{
-		Ctx:          ctx,
-		Method:       method,
-		URL:          urlStr,
-		Status:       status,
-		ResponseTime: dur,
-		ReqHeaders:   reqHeaders,
-		ReqBody:      reqBody,
-		ResBody:      resBody,
-		Err:          err,
-		Attempt:      attempt,
+		Ctx:            ctx,
+		Method:         method,
+		URL:            urlStr,
+		Status:         status,
+		ResponseTime:   dur,
+		ReqHeaders:     reqHeaders,
+		ReqBody:        reqBody,
+		ResHeaders:     resHeaders,
+		ResBody:        resBody,
+		Err:            err,
+		Attempt:        attempt,
+		RetryExhausted: retryExhausted,
 	})
 }
 

@@ -44,9 +44,15 @@ func HookFor(l *Logger) httpclient.Hook {
 			errStr = &s
 		}
 
+		var reqHeaders any
+		if len(r.ReqHeaders) > 0 {
+			reqHeaders = r.ReqHeaders
+		}
+
 		out := Outgoing{
 			Req: &Req{
-				Body: DecodeJSONBody(r.ReqBody),
+				Headers: reqHeaders,
+				Body:    DecodeJSONBody(r.ReqBody),
 			},
 			Res: &Res{
 				Body:       DecodeJSONBody(r.ResBody),

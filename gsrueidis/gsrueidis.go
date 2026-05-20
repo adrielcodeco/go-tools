@@ -24,6 +24,14 @@ import (
 	"github.com/adrielcodeco/go-tools/gscore"
 )
 
+// CloserRegistrar is the subset of gscore.Manager used by gsrueidis helpers.
+// Accepting an interface instead of the concrete *gscore.Manager avoids a hard
+// dependency on gscore from gsrueidis.
+// *gscore.Manager satisfies this interface directly.
+type CloserRegistrar interface {
+	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
+}
+
 // Closer is the subset of rueidis.Client that gsrueidis needs.
 // Provided as an interface so tests (and any custom wrappers) can
 // supply a fake without spinning up a real Redis.
@@ -51,7 +59,7 @@ var ErrCloseTimedOut = errors.New("gsrueidis: client.Close() timed out")
 // Returns nothing — registration is idempotent only at the gscore level.
 // Calling Register twice with the same client will close it twice; the
 // second call is a no-op inside rueidis but emits a misleading error.
-func Register(mgr *gscore.Manager, name string, client Closer, phase gscore.Phase, timeout time.Duration) {
+func Register(mgr CloserRegistrar, name string, client Closer, phase gscore.Phase, timeout time.Duration) {
 	if client == nil {
 		return
 	}
@@ -86,6 +94,6 @@ func makeCloseFn(client Closer) func(ctx context.Context) error {
 // RegisterRueidis is a typed convenience wrapper for callers who don't
 // want to type-assert to the Closer interface. Functionally identical
 // to Register.
-func RegisterRueidis(mgr *gscore.Manager, name string, client rueidis.Client, phase gscore.Phase, timeout time.Duration) {
+func RegisterRueidis(mgr CloserRegistrar, name string, client rueidis.Client, phase gscore.Phase, timeout time.Duration) {
 	Register(mgr, name, client, phase, timeout)
 }

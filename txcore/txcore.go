@@ -142,6 +142,7 @@ func (h *Holder) Rollback() {
 	onErr := h.onCallbackError
 	compensCtx := h.compensCtx
 	tracked := h.tracked
+	reqCtx := h.reqCtx
 	h.mu.Unlock()
 
 	if started && tx != nil && !committed {
@@ -150,7 +151,11 @@ func (h *Holder) Rollback() {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), compensCtx)
+	base := context.Background()
+	if reqCtx != nil {
+		base = context.WithoutCancel(reqCtx)
+	}
+	ctx, cancel := context.WithTimeout(base, compensCtx)
 	defer cancel()
 	compDB := h.db.WithContext(ctx)
 	for _, fn := range callbacks {

@@ -623,6 +623,54 @@ func TestOnCommitCallbackReceivesReqCtx(t *testing.T) {
 	}
 }
 
+// TestOnRollbackCallbackReceivesReqCtx verifies that the *gorm.DB passed to an
+// OnRollback callback carries context values from the original request context
+// (via context.WithoutCancel), not context.Background().
+func TestOnRollbackCallbackReceivesReqCtx(t *testing.T) {
+	db := setupTestDB(t)
+
+	type ctxMarkerKey struct{}
+	markerVal := "rollback-req-ctx-marker"
+	reqCtx := context.WithValue(context.Background(), ctxMarkerKey{}, markerVal)
+
+	h := NewHolder(db, 5*time.Second, false, nil)
+	h.Begin(reqCtx)
+
+	var gotCtx context.Context
+	h.AppendOnRollback(func(callbackDB *gorm.DB) error {
+		gotCtx = callbackDB.Statement.Context
+		return nil
+	})
+
+	h.Rollback()
+
+	if gotCtx == nil {
+		t.Fatal("OnRollback callback did not receive a context")
+	}
+	if got := gotCtx.Value(ctxMarkerKey{}); got != markerVal {
+		t.Errorf("OnRollback DB context does not carry the request context: got %v, want %q", got, markerVal)
+	}
+}
+
+// TestOnRollbackCallbackFallsBackToBackground verifies that when Begin was never
+// called (reqCtx is nil), OnRollback callbacks still receive a valid (background) context.
+func TestOnRollbackCallbackFallsBackToBackground(t *testing.T) {
+	db := setupTestDB(t)
+	h := NewHolder(db, 5*time.Second, false, nil)
+
+	var gotCtx context.Context
+	h.AppendOnRollback(func(callbackDB *gorm.DB) error {
+		gotCtx = callbackDB.Statement.Context
+		return nil
+	})
+
+	h.Rollback()
+
+	if gotCtx == nil {
+		t.Fatal("OnRollback callback did not receive a context")
+	}
+}
+
 // TestOnCommitCallbackFallsBackToBackground verifies that when Begin was never
 // called, OnCommit callbacks still receive a valid (background) context.
 func TestOnCommitCallbackFallsBackToBackground(t *testing.T) {

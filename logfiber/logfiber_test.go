@@ -498,6 +498,96 @@ func TestGetResStatusCode_NonSuccess(t *testing.T) {
 // handler error propagation
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// OBS-4: Error level when handler returns an error
+// ---------------------------------------------------------------------------
+
+func TestMiddleware_ErrorLevelOnHandlerError(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			return c.Status(500).SendString(err.Error())
+		},
+	})
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Get("/err-level", func(c *fiber.Ctx) error {
+		return errors.New("something went wrong")
+	})
+
+	if _, err := app.Test(httptest.NewRequest("GET", "/err-level", nil)); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+	if entry.Level != zapcore.ErrorLevel {
+		t.Errorf("expected ErrorLevel when handler returns error, got %v", entry.Level)
+	}
+}
+
+func TestMiddleware_InfoLevelOnSuccess(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Get("/ok", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	if _, err := app.Test(httptest.NewRequest("GET", "/ok", nil)); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+	if entry.Level != zapcore.InfoLevel {
+		t.Errorf("expected InfoLevel on success, got %v", entry.Level)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// COR-3: ECS error.message top-level field
+// ---------------------------------------------------------------------------
+
+func TestMiddleware_ECSErrorMessage(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			return c.Status(500).SendString(err.Error())
+		},
+	})
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Get("/ecs-err", func(c *fiber.Ctx) error {
+		return errors.New("ecs error message")
+	})
+
+	if _, err := app.Test(httptest.NewRequest("GET", "/ecs-err", nil)); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+
+	var errMsgField *zapcore.Field
+	for i := range entry.Context {
+		if entry.Context[i].Key == "error.message" {
+			f := entry.Context[i]
+			errMsgField = &f
+			break
+		}
+	}
+	if errMsgField == nil {
+		t.Fatal("expected top-level field error.message, not found")
+	}
+	if errMsgField.String != "ecs error message" {
+		t.Errorf("error.message = %q, want %q", errMsgField.String, "ecs error message")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handler error propagation
+// ---------------------------------------------------------------------------
+
 func TestMiddleware_LogsHandlerError(t *testing.T) {
 	l, logs := newObservedLogger(t)
 	app := fiber.New(fiber.Config{

@@ -91,10 +91,12 @@ func Middleware(cfg Config) fiber.Handler {
 			ResponseTime: responseTime.String(),
 		}
 		if hErr != nil {
-			msg := hErr.Error()
-			incoming.Error = &msg
+			errMsg := hErr.Error()
+			incoming.Error = &errMsg
+			logger.Error(msg, zap.Any("incoming", incoming), zap.String("error.message", errMsg))
+		} else {
+			logger.Info(msg, zap.Any("incoming", incoming))
 		}
-		logger.Info(msg, zap.Any("incoming", incoming))
 		return hErr
 	}
 }
