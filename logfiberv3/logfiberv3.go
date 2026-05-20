@@ -22,12 +22,12 @@ type Config struct {
 
 	// SkipFunc, when non-nil, is called for every request that was not
 	// already skipped by SkipPaths. Returning true suppresses the log
-	// entry. Use this for pattern- or prefix-based skip rules:
+	// entry. Use this for method-, pattern- or prefix-based skip rules:
 	//
-	//   cfg.SkipFunc = func(path string) bool {
-	//       return strings.HasPrefix(path, "/internal/")
+	//   cfg.SkipFunc = func(method, path string) bool {
+	//       return method == "OPTIONS" || strings.HasPrefix(path, "/internal/")
 	//   }
-	SkipFunc func(path string) bool
+	SkipFunc func(method, path string) bool
 
 	// Logger overrides the global logcore logger. Nil → use the global.
 	Logger *logcore.Logger
@@ -55,7 +55,7 @@ func Middleware(cfg Config) fiber.Handler {
 		if _, ok := skip[path]; ok {
 			return c.Next()
 		}
-		if cfg.SkipFunc != nil && cfg.SkipFunc(path) {
+		if cfg.SkipFunc != nil && cfg.SkipFunc(c.Method(), path) {
 			return c.Next()
 		}
 

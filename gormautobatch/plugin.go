@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+
+	"github.com/adrielcodeco/go-tools/gscore"
 )
 
 const pluginName = "gorm:autobatch"
@@ -196,12 +198,8 @@ func (p *Plugin) Initialize(db *gorm.DB) error {
 }
 
 // CloserRegistrar is the subset of gscore.Manager used by RegisterWithManager.
-// Accepting an interface instead of the concrete type avoids a hard dependency
-// on gscore from gormautobatch.
-type CloserRegistrar interface {
-	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
-	RegisterCloserWithPriority(name string, phase int, priority int, timeout time.Duration, fn func(ctx context.Context) error)
-}
+// It is a type alias for gscore.CloserRegistrar; *gscore.Manager satisfies it directly.
+type CloserRegistrar = gscore.CloserRegistrar
 
 // RegisterWithManager registers p.Close() as a PhasePostDrain closer on mgr.
 // This ensures that all in-flight batches are drained after HTTP drain ends but

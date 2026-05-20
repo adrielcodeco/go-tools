@@ -176,6 +176,10 @@ func (f *fakeRegistrar) RegisterCloser(name string, phase int, timeout time.Dura
 	f.fn = fn
 }
 
+func (f *fakeRegistrar) RegisterCloserWithPriority(name string, phase int, _ int, timeout time.Duration, fn func(context.Context) error) {
+	f.RegisterCloser(name, phase, timeout, fn)
+}
+
 // ---------------------------------------------------------------------------
 // RegisterWithManager tests
 // ---------------------------------------------------------------------------

@@ -4,14 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"github.com/adrielcodeco/go-tools/gscore"
 )
 
 // CloserRegistrar is the subset of gscore.Manager used by apmcore helpers.
-// Using an interface avoids an import cycle between apmcore and gscore.
-// *gscore.Manager satisfies this interface directly.
-type CloserRegistrar interface {
-	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
-}
+// It is a type alias for gscore.CloserRegistrar; *gscore.Manager satisfies it directly.
+type CloserRegistrar = gscore.CloserRegistrar
 
 // RegisterWithManager registers the OTel SDK shutdown function as a
 // PhasePostDB closer. Call this immediately after SetupOTelSDK so that

@@ -13,6 +13,7 @@
 package apmfiberv3
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	apm "go.elastic.co/apm/v2"
 
 	"github.com/adrielcodeco/go-tools/apmcore"
+	"github.com/adrielcodeco/go-tools/txctxv3"
 )
 
 // Option mutates middleware configuration. Mirrors the apmfiber v2 API.
@@ -189,4 +191,12 @@ func SetLabel(c fiber.Ctx, key, value string) {
 // handlers that map errors inline so the error still appears in Kibana.
 func CaptureError(c fiber.Ctx, err error) {
 	apmcore.CaptureError(c.RequestCtx(), err)
+}
+
+// TxContextExtractor returns a ContextExtractor for txctxv3.Middleware that
+// inherits the Elastic APM transaction from the Fiber v3 request context.
+// Supply it as the third argument to txctxv3.Middleware whenever
+// apmfiberv3.Middleware is also in the chain.
+func TxContextExtractor() txctxv3.ContextExtractor {
+	return func(c fiber.Ctx) context.Context { return c.Context() }
 }

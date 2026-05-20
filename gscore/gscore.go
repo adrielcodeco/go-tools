@@ -82,6 +82,15 @@ type Hook struct {
 	Run      func(ctx context.Context) error
 }
 
+// CloserRegistrar is the minimal interface that gscore.Manager satisfies for
+// registering graceful-shutdown closers. Sub-packages (txcore, apmcore,
+// logcore, gormautobatch, gsredis, gsrueidis) declare a local type alias to
+// this interface to avoid importing gscore directly.
+type CloserRegistrar interface {
+	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
+	RegisterCloserWithPriority(name string, phase int, priority int, timeout time.Duration, fn func(ctx context.Context) error)
+}
+
 // Logger is the structured-logging surface the Manager calls during the
 // shutdown sequence. Implementations should be safe for concurrent use.
 type Logger interface {

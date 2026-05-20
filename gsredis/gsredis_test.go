@@ -8,11 +8,12 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/adrielcodeco/go-tools/gscore"
 	"github.com/adrielcodeco/go-tools/gsredis"
 )
 
 // fakeRegistrar captures the arguments passed to RegisterCloser so tests can
-// assert on them without importing gscore.
+// assert on them.
 type fakeRegistrar struct {
 	name    string
 	phase   int
@@ -27,6 +28,10 @@ func (f *fakeRegistrar) RegisterCloser(name string, phase int, timeout time.Dura
 	f.fn = fn
 }
 
+func (f *fakeRegistrar) RegisterCloserWithPriority(name string, phase int, _ int, timeout time.Duration, fn func(context.Context) error) {
+	f.RegisterCloser(name, phase, timeout, fn)
+}
+
 // newOfflineClient returns a *redis.Client configured to a non-existent
 // address. Close() on such a client completes synchronously without error.
 func newOfflineClient() redis.UniversalClient {
@@ -37,13 +42,13 @@ func TestRegisterRegistersCloser(t *testing.T) {
 	reg := &fakeRegistrar{}
 	client := newOfflineClient()
 
-	gsredis.Register(client, reg, 4, 100*time.Millisecond)
+	gsredis.Register(client, reg, gscore.PhasePostDB, 100*time.Millisecond)
 
 	if reg.name != "gsredis" {
 		t.Errorf("name = %q, want %q", reg.name, "gsredis")
 	}
-	if reg.phase != 4 {
-		t.Errorf("phase = %d, want 4", reg.phase)
+	if reg.phase != int(gscore.PhasePostDB) {
+		t.Errorf("phase = %d, want %d (PhasePostDB)", reg.phase, int(gscore.PhasePostDB))
 	}
 	if reg.timeout != 100*time.Millisecond {
 		t.Errorf("timeout = %v, want 100ms", reg.timeout)
@@ -65,7 +70,7 @@ func TestRegisterDefaultTimeout(t *testing.T) {
 	client := newOfflineClient()
 	defer client.Close() //nolint:errcheck
 
-	gsredis.Register(client, reg, 4, 0) // zero → DefaultTimeout
+	gsredis.Register(client, reg, gscore.PhasePostDB, 0) // zero → DefaultTimeout
 
 	if reg.timeout != gsredis.DefaultTimeout {
 		t.Errorf("timeout = %v, want DefaultTimeout (%v)", reg.timeout, gsredis.DefaultTimeout)
@@ -74,7 +79,7 @@ func TestRegisterDefaultTimeout(t *testing.T) {
 
 func TestRegisterNilClientIsNoop(t *testing.T) {
 	reg := &fakeRegistrar{}
-	gsredis.Register(nil, reg, 4, 0)
+	gsredis.Register(nil, reg, gscore.PhasePostDB, 0)
 	if reg.name != "" {
 		t.Errorf("expected no registration for nil client, but name = %q", reg.name)
 	}
@@ -103,7 +108,7 @@ func TestRegisterHonorsTimeout(t *testing.T) {
 	inner := newOfflineClient()
 	client := &slowUniversalClient{UniversalClient: inner, block: 300 * time.Millisecond}
 
-	gsredis.Register(client, reg, 4, 50*time.Millisecond)
+	gsredis.Register(client, reg, gscore.PhasePostDB, 50*time.Millisecond)
 
 	if reg.fn == nil {
 		t.Fatal("fn must not be nil")

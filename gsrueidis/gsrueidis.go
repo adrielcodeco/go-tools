@@ -25,12 +25,8 @@ import (
 )
 
 // CloserRegistrar is the subset of gscore.Manager used by gsrueidis helpers.
-// Accepting an interface instead of the concrete *gscore.Manager avoids a hard
-// dependency on gscore from gsrueidis.
-// *gscore.Manager satisfies this interface directly.
-type CloserRegistrar interface {
-	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
-}
+// It is a type alias for gscore.CloserRegistrar; *gscore.Manager satisfies it directly.
+type CloserRegistrar = gscore.CloserRegistrar
 
 // Closer is the subset of rueidis.Client that gsrueidis needs.
 // Provided as an interface so tests (and any custom wrappers) can

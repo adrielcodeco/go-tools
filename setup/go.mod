@@ -6,7 +6,10 @@ require (
 	github.com/adrielcodeco/go-tools v0.0.0
 	github.com/adrielcodeco/go-tools/apmcore v0.0.0
 	github.com/adrielcodeco/go-tools/gormautobatch v0.0.0
+	github.com/adrielcodeco/go-tools/gsfiberv3 v0.0.0
 	github.com/adrielcodeco/go-tools/logcore v0.0.0
+	github.com/gofiber/fiber/v2 v2.52.13
+	github.com/gofiber/fiber/v3 v3.2.0
 	github.com/redis/go-redis/v9 v9.16.0
 	github.com/redis/rueidis v1.0.75
 	gorm.io/driver/sqlite v1.6.0
@@ -27,18 +30,26 @@ require (
 	github.com/elastic/go-windows v1.0.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/gofiber/schema v1.7.1 // indirect
+	github.com/gofiber/utils/v2 v2.0.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/joeshaw/multierror v0.0.0-20140124173710-69b34d4ec901 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
+	github.com/mattn/go-isatty v0.0.21 // indirect
+	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/mattn/go-sqlite3 v1.14.22 // indirect
+	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/procfs v0.7.3 // indirect
 	github.com/redis/go-redis/extra/rediscmd/v9 v9.16.0 // indirect
 	github.com/redis/go-redis/extra/redisotel/v9 v9.16.0 // indirect
 	github.com/redis/rueidis/rueidisotel v1.0.75 // indirect
+	github.com/rivo/uniseg v0.2.0 // indirect
+	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.71.0 // indirect
@@ -57,6 +68,8 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
+	golang.org/x/crypto v0.50.0 // indirect
+	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	howett.net/plist v1.0.0 // indirect
@@ -66,6 +79,7 @@ replace (
 	github.com/adrielcodeco/go-tools => ../
 	github.com/adrielcodeco/go-tools/apmcore => ../apmcore
 	github.com/adrielcodeco/go-tools/gormautobatch => ../gormautobatch
+	github.com/adrielcodeco/go-tools/gsfiberv3 => ../gsfiberv3
 	github.com/adrielcodeco/go-tools/gsredis => ../gsredis
 	github.com/adrielcodeco/go-tools/gsrueidis => ../gsrueidis
 	github.com/adrielcodeco/go-tools/httpclient => ../httpclient

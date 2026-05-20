@@ -20,6 +20,7 @@
 package apmfiber
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/gofiber/fiber/v2"
@@ -27,6 +28,7 @@ import (
 	apm "go.elastic.co/apm/v2"
 
 	"github.com/adrielcodeco/go-tools/apmcore"
+	"github.com/adrielcodeco/go-tools/txctx"
 )
 
 // Middleware returns the upstream apmfiber middleware. It must be the
@@ -103,6 +105,14 @@ func Labels(cfg LabelsConfig) fiber.Handler {
 // (e.g. a generated ID returned from a domain call).
 func SetLabel(c *fiber.Ctx, key, value string) {
 	apmcore.SetLabel(c.Context(), key, value)
+}
+
+// TxContextExtractor returns a ContextExtractor for txctx.Middleware that
+// inherits the Elastic APM transaction from the Fiber v2 request context.
+// Supply it as the third argument to txctx.Middleware whenever
+// apmfiber.Middleware is also in the chain.
+func TxContextExtractor() txctx.ContextExtractor {
+	return func(c *fiber.Ctx) context.Context { return c.Context() }
 }
 
 // CaptureError records err on the active APM transaction. Call it from

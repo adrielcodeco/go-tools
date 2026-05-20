@@ -9,7 +9,9 @@ require (
 )
 
 require (
+	github.com/adrielcodeco/go-tools v0.0.0 // indirect
 	github.com/adrielcodeco/go-tools/apmcore v0.0.0 // indirect
+	github.com/adrielcodeco/go-tools/gormautobatch v0.0.0 // indirect
 	github.com/adrielcodeco/go-tools/httpclient v0.0.0 // indirect
 	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/armon/go-radix v1.0.0 // indirect
@@ -39,6 +41,8 @@ require (
 	github.com/redis/go-redis/extra/rediscmd/v9 v9.16.0 // indirect
 	github.com/redis/go-redis/extra/redisotel/v9 v9.16.0 // indirect
 	github.com/redis/go-redis/v9 v9.16.0 // indirect
+	github.com/redis/rueidis v1.0.75 // indirect
+	github.com/redis/rueidis/rueidisotel v1.0.75 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
@@ -49,12 +53,12 @@ require (
 	go.elastic.co/apm/module/apmzap/v2 v2.7.1 // indirect
 	go.elastic.co/apm/v2 v2.7.1 // indirect
 	go.elastic.co/fastjson v1.5.1 // indirect
-	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
-	go.opentelemetry.io/otel v1.38.0 // indirect
-	go.opentelemetry.io/otel/metric v1.38.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.38.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.38.0 // indirect
-	go.opentelemetry.io/otel/trace v1.38.0 // indirect
+	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
+	go.opentelemetry.io/otel v1.43.0 // indirect
+	go.opentelemetry.io/otel/metric v1.43.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.43.0 // indirect
+	go.opentelemetry.io/otel/sdk/metric v1.43.0 // indirect
+	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
@@ -66,7 +70,9 @@ require (
 )
 
 replace (
+	github.com/adrielcodeco/go-tools => ../
 	github.com/adrielcodeco/go-tools/apmcore => ../apmcore
+	github.com/adrielcodeco/go-tools/gormautobatch => ../gormautobatch
 	github.com/adrielcodeco/go-tools/httpclient => ../httpclient
 	github.com/adrielcodeco/go-tools/logcore => ../logcore
 )

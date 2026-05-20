@@ -26,6 +26,10 @@ func (r *fakeRegistrar) RegisterCloser(name string, phase int, timeout time.Dura
 	r.fn = fn
 }
 
+func (r *fakeRegistrar) RegisterCloserWithPriority(name string, phase int, _ int, timeout time.Duration, fn func(ctx context.Context) error) {
+	r.RegisterCloser(name, phase, timeout, fn)
+}
+
 type fakeClient struct {
 	called atomic.Int32
 	block  time.Duration

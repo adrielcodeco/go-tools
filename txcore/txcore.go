@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+
+	"github.com/adrielcodeco/go-tools/gscore"
 )
 
 type ctxKey struct{}
@@ -38,12 +40,8 @@ func wgDone() {
 }
 
 // CloserRegistrar is the subset of gscore.Manager used by RegisterWithManager.
-// Accepting an interface instead of the concrete *gscore.Manager avoids a hard
-// dependency on gscore from txcore.
-type CloserRegistrar interface {
-	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
-	RegisterCloserWithPriority(name string, phase int, priority int, timeout time.Duration, fn func(ctx context.Context) error)
-}
+// It is a type alias for gscore.CloserRegistrar; *gscore.Manager satisfies it directly.
+type CloserRegistrar = gscore.CloserRegistrar
 
 // RegisterWithManager registers a PhasePostDrain closer that blocks until all
 // active transaction holders (including their compensation callbacks) finish.

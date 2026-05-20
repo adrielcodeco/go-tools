@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/adrielcodeco/go-tools/gscore"
 )
 
 // gscoreLoggerIface is a local mirror of gscore.Logger. Any value that
@@ -52,10 +54,8 @@ func GSCoreGlobalLogger() gscoreLoggerIface {
 }
 
 // CloserRegistrar is the subset of gscore.Manager used by logcore helpers.
-// *gscore.Manager satisfies this interface directly.
-type CloserRegistrar interface {
-	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
-}
+// It is a type alias for gscore.CloserRegistrar; *gscore.Manager satisfies it directly.
+type CloserRegistrar = gscore.CloserRegistrar
 
 // RegisterWithManager registers logger.Sync() as a closer on mgr so the zap
 // OS write buffer is flushed before the process exits. Must be called after

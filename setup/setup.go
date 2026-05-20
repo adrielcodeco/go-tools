@@ -18,6 +18,8 @@ import (
 	"context"
 	"time"
 
+	fiberv2 "github.com/gofiber/fiber/v2"
+	fiberv3 "github.com/gofiber/fiber/v3"
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/rueidis"
 	"gorm.io/gorm"
@@ -25,17 +27,16 @@ import (
 	"github.com/adrielcodeco/go-tools/apmcore"
 	autobatch "github.com/adrielcodeco/go-tools/gormautobatch"
 	"github.com/adrielcodeco/go-tools/gscore"
+	"github.com/adrielcodeco/go-tools/gsfiber"
+	"github.com/adrielcodeco/go-tools/gsfiberv3"
 	"github.com/adrielcodeco/go-tools/logcore"
 	"github.com/adrielcodeco/go-tools/txcore"
 )
 
 // registrar is the minimal subset of *gscore.Manager required by Build.
-// It is satisfied by *gscore.Manager directly. Exposing it as an unexported
-// interface lets tests inject a recording fake without changing the public API.
-type registrar interface {
-	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
-	RegisterCloserWithPriority(name string, phase int, priority int, timeout time.Duration, fn func(ctx context.Context) error)
-}
+// It is a type alias for gscore.CloserRegistrar; *gscore.Manager satisfies it directly.
+// Kept as a private alias so tests can inject a recording fake without changing the public API.
+type registrar = gscore.CloserRegistrar
 
 // redisEntry holds a go-redis UniversalClient and its log name.
 type redisEntry struct {
@@ -61,6 +62,8 @@ type Builder struct {
 	httpClientLog  bool
 	redisClients   []redisEntry
 	rueidisClients []rueidisEntry
+	fiberV2App     *fiberv2.App
+	fiberV3App     *fiberv3.App
 }
 
 // Result is returned by Build and carries handles to the resources that were
@@ -141,20 +144,37 @@ func (b *Builder) WithRueidis(client rueidis.Client, name string) *Builder {
 	return b
 }
 
+// WithFiberV2 registers a Fiber v2 app on the Manager so it is drained during
+// the drain phase of graceful shutdown. Multiple calls are not supported;
+// only the last supplied app is registered.
+func (b *Builder) WithFiberV2(app *fiberv2.App) *Builder {
+	b.fiberV2App = app
+	return b
+}
+
+// WithFiberV3 registers a Fiber v3 app on the Manager so it is drained during
+// the drain phase of graceful shutdown. Multiple calls are not supported;
+// only the last supplied app is registered.
+func (b *Builder) WithFiberV3(app *fiberv3.App) *Builder {
+	b.fiberV3App = app
+	return b
+}
+
 // Build wires all configured components onto mgr in the required order:
 //
-//  1. apmcore.SetupOTelSDK                      (if WithOTel)
-//  2. logcore.New + logcore.SetGlobal           (if WithLogger)
-//  3. apmcore.NewGormPlugin via db.Use          (if WithGORM + WithOTel)
-//  4. mgr.RegisterDB                            (if WithGORM)
-//  5. txcore.RegisterWithManager                (if WithGORM)
-//  6. apmcore.RegisterDBPoolMetricsWithManager  (if WithGORM + WithOTel)
-//  7. autobatch.RegisterWithManager             (if WithAutobatch or WithAutobatchConfig)
-//  8. go-redis closers + optional OTel hooks    (if WithRedis)
-//  9. rueidis closers + optional OTel wrapping  (if WithRueidis)
-//  10. apmcore.RegisterWithManager              (if WithOTel)
-//  11. logcore.RegisterGlobalWithManager        (if WithLogger)
-//  12. logcore.InstallHTTPClientHook            (if WithHTTPClientLogging)
+//  0. gsfiber.RegisterApp / gsfiberv3.RegisterApp  (if WithFiberV2 / WithFiberV3)
+//  1. apmcore.SetupOTelSDK                         (if WithOTel)
+//  2. logcore.New + logcore.SetGlobal              (if WithLogger)
+//  3. apmcore.NewGormPlugin via db.Use             (if WithGORM + WithOTel)
+//  4. mgr.RegisterDB                               (if WithGORM)
+//  5. txcore.RegisterWithManager                   (if WithGORM)
+//  6. apmcore.RegisterDBPoolMetricsWithManager     (if WithGORM + WithOTel)
+//  7. autobatch.RegisterWithManager                (if WithAutobatch or WithAutobatchConfig)
+//  8. go-redis closers + optional OTel hooks       (if WithRedis)
+//  9. rueidis closers + optional OTel wrapping     (if WithRueidis)
+//  10. apmcore.RegisterWithManager                 (if WithOTel)
+//  11. logcore.RegisterGlobalWithManager           (if WithLogger)
+//  12. logcore.InstallHTTPClientHook               (if WithHTTPClientLogging)
 //
 // Build returns an error only if apmcore.SetupOTelSDK, logcore.New, or
 // db.Use(apmcore.NewGormPlugin()) fails.
@@ -166,6 +186,19 @@ func (b *Builder) Build(mgr *gscore.Manager) (*Result, error) {
 // allowing tests to inject a recording fake without changing the public API.
 func (b *Builder) build(mgr registrar) (*Result, error) {
 	res := &Result{}
+
+	// 0. Register Fiber apps — must happen before any closers so the server is
+	// known to the Manager before ListenAndWait is called.
+	if b.fiberV2App != nil {
+		if m, ok := mgr.(*gscore.Manager); ok {
+			gsfiber.RegisterApp(m, b.fiberV2App)
+		}
+	}
+	if b.fiberV3App != nil {
+		if m, ok := mgr.(*gscore.Manager); ok {
+			gsfiberv3.RegisterApp(m, b.fiberV3App)
+		}
+	}
 
 	// 1. OTel SDK setup — must happen before logger so APM core is ready.
 	if b.otelCtx != nil {

@@ -17,15 +17,14 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/adrielcodeco/go-tools/apmcore"
+	"github.com/adrielcodeco/go-tools/gscore"
 )
 
 // CloserRegistrar is the subset of gscore.Manager used by gsredis helpers.
-// Accepting an interface instead of the concrete *gscore.Manager avoids a hard
-// dependency on gscore from gsredis.
-// *gscore.Manager satisfies this interface directly.
-type CloserRegistrar interface {
-	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
-}
+// It is a type alias for gscore.CloserRegistrar; *gscore.Manager satisfies it directly.
+type CloserRegistrar = gscore.CloserRegistrar
 
 // DefaultTimeout is used by Register when timeout=0 is passed.
 const DefaultTimeout = 5 * time.Second
@@ -44,14 +43,28 @@ var ErrCloseTimedOut = errors.New("gsredis: client.Close() timed out")
 //
 // Calling Register twice with the same client will close it twice; go-redis
 // returns an error on the second call, which the manager logs.
-func Register(client redis.UniversalClient, mgr CloserRegistrar, phase int, timeout time.Duration) {
+func Register(client redis.UniversalClient, mgr CloserRegistrar, phase gscore.Phase, timeout time.Duration) {
 	if client == nil || mgr == nil {
 		return
 	}
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}
-	mgr.RegisterCloser("gsredis", phase, timeout, makeCloseFn(client))
+	mgr.RegisterCloser("gsredis", int(phase), timeout, makeCloseFn(client))
+}
+
+// InstrumentAndRegister instruments client with OpenTelemetry tracing and
+// metrics via apmcore, then registers its Close for graceful shutdown.
+// Use this instead of Register when apmcore.SetupOTelSDK has been called.
+//
+// Returns the error from apmcore.InstrumentRedis if instrumentation fails;
+// the caller may choose to ignore it since tracing is best-effort.
+func InstrumentAndRegister(client redis.UniversalClient, mgr CloserRegistrar, phase gscore.Phase, timeout time.Duration) error {
+	if err := apmcore.InstrumentRedis(client); err != nil {
+		return err
+	}
+	Register(client, mgr, phase, timeout)
+	return nil
 }
 
 // makeCloseFn wraps client.Close() into a ctx-aware closer. Close runs in a

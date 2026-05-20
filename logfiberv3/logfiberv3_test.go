@@ -86,7 +86,7 @@ func TestMiddlewareSkipFunc_SkipsMatchingPath(t *testing.T) {
 	app.Use(logfiberv3.Middleware(logfiberv3.Config{
 		Logger:    l,
 		SkipPaths: []string{},
-		SkipFunc:  func(p string) bool { return strings.HasPrefix(p, "/internal") },
+		SkipFunc:  func(_, p string) bool { return strings.HasPrefix(p, "/internal") },
 	}))
 	app.Get("/internal/health", func(c fiber.Ctx) error { return c.SendStatus(200) })
 
@@ -103,7 +103,7 @@ func TestMiddlewareSkipFunc_DoesNotSkipNonMatching(t *testing.T) {
 	app.Use(logfiberv3.Middleware(logfiberv3.Config{
 		Logger:    l,
 		SkipPaths: []string{},
-		SkipFunc:  func(p string) bool { return strings.HasPrefix(p, "/internal") },
+		SkipFunc:  func(_, p string) bool { return strings.HasPrefix(p, "/internal") },
 	}))
 	app.Get("/api/users", func(c fiber.Ctx) error { return c.SendStatus(200) })
 
@@ -120,7 +120,7 @@ func TestMiddlewareSkipFunc_ComposesWithSkipPaths(t *testing.T) {
 	app.Use(logfiberv3.Middleware(logfiberv3.Config{
 		Logger:    l,
 		SkipPaths: []string{"/health"},
-		SkipFunc:  func(p string) bool { return p == "/metrics" },
+		SkipFunc:  func(_, p string) bool { return p == "/metrics" },
 	}))
 	app.Get("/health", func(c fiber.Ctx) error { return c.SendStatus(200) })
 	app.Get("/metrics", func(c fiber.Ctx) error { return c.SendStatus(200) })
