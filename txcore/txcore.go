@@ -42,6 +42,7 @@ func wgDone() {
 // dependency on gscore from txcore.
 type CloserRegistrar interface {
 	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
+	RegisterCloserWithPriority(name string, phase int, priority int, timeout time.Duration, fn func(ctx context.Context) error)
 }
 
 // RegisterWithManager registers a PhasePostDrain closer that blocks until all
@@ -57,7 +58,7 @@ type CloserRegistrar interface {
 //	txcore.RegisterWithManager(mgr, gscore.PhasePostDrain, 35*time.Second)
 func RegisterWithManager(mgr CloserRegistrar, phase int, timeout time.Duration) {
 	trackingActive.Store(true)
-	mgr.RegisterCloser("txcore-drain", phase, timeout, func(_ context.Context) error {
+	mgr.RegisterCloserWithPriority("txcore-drain", phase, 0, timeout, func(_ context.Context) error {
 		activeWg.Wait()
 		return nil
 	})
@@ -174,9 +175,14 @@ func (h *Holder) Commit() (commitErr error, postCommitErr error) {
 	callbacks := h.onCommit
 	onErr := h.onCallbackError
 	tracked := h.tracked
+	reqCtx := h.reqCtx
 	h.mu.Unlock()
 
-	bg := h.db.WithContext(context.Background())
+	callbackCtx := reqCtx
+	if callbackCtx == nil {
+		callbackCtx = context.Background()
+	}
+	bg := h.db.WithContext(callbackCtx)
 
 	if started && tx != nil {
 		if err := tx.Commit().Error; err != nil {

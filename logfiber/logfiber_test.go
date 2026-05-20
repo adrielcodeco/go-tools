@@ -2,6 +2,7 @@ package logfiber_test
 
 import (
 	"bytes"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -490,5 +491,49 @@ func TestGetResStatusCode_NonSuccess(t *testing.T) {
 				t.Errorf("expected status %q, got %q", tc.want, inc.Res.StatusCode)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handler error propagation
+// ---------------------------------------------------------------------------
+
+func TestMiddleware_LogsHandlerError(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New(fiber.Config{
+		// Disable the default error handler so it doesn't swallow the error
+		// before the middleware can inspect it.
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			return c.Status(500).SendString(err.Error())
+		},
+	})
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Get("/boom", func(c *fiber.Ctx) error {
+		return errors.New("boom")
+	})
+
+	if _, err := app.Test(httptest.NewRequest("GET", "/boom", nil)); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+	var inc *logcore.Incoming
+	for _, f := range entry.Context {
+		if f.Key == "incoming" {
+			v := f.Interface.(logcore.Incoming)
+			inc = &v
+			break
+		}
+	}
+	if inc == nil {
+		t.Fatal("missing incoming field")
+	}
+	if inc.Error == nil {
+		t.Fatal("expected error field to be set, got nil")
+	}
+	if *inc.Error != "boom" {
+		t.Errorf("expected error %q, got %q", "boom", *inc.Error)
 	}
 }

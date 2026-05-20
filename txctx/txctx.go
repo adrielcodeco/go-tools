@@ -19,11 +19,28 @@ func BoolPtr(v bool) *bool { return txcore.BoolPtr(v) }
 
 // ContextExtractor is called once per request to obtain the base context for
 // the transaction holder. When provided to Middleware it is used instead of
-// c.UserContext(). Use this when apmfiber.Middleware is in the chain so that
-// the APM transaction stored on the fasthttp RequestCtx is visible inside
-// GORM callbacks:
+// c.UserContext().
 //
-//	txctx.Middleware(db, cfg, func(c *fiber.Ctx) context.Context { return c.Context() })
+// When to use it: Elastic APM stores its transaction on the fasthttp
+// RequestCtx (accessible via c.Context()), while Fiber keeps its own
+// stdlib context on c.UserContext(). Without an extractor, GORM callbacks
+// that call apmgorm.WithContext lose the APM transaction. Supply an
+// extractor whenever apmfiber.Middleware is in the chain.
+//
+// Correct 3-middleware ordering:
+//
+//	app.Use(apmfiber.Middleware())   // 1. captures APM tx on RequestCtx
+//	app.Use(logfiber.Middleware())   // 2. reads APM tx for trace fields
+//	app.Use(txctx.Middleware(db, cfg, extractor)) // 3. inherits APM ctx
+//
+// Example extractor for Fiber v2 (pulls the fasthttp RequestCtx which
+// carries the APM transaction set by apmfiber.Middleware):
+//
+//	func(c *fiber.Ctx) context.Context { return (*c).UserContext() }
+//
+// To forward the APM-enriched fasthttp context into GORM, use:
+//
+//	func(c *fiber.Ctx) context.Context { return c.Context() }
 type ContextExtractor func(c *fiber.Ctx) context.Context
 
 // Middleware returns a Fiber v2 middleware that manages a request-scoped GORM

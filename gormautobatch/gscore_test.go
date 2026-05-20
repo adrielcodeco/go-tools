@@ -11,15 +11,24 @@ import (
 
 // fakeRegistrar captures the arguments passed to RegisterCloser for inspection.
 type fakeRegistrar struct {
-	name    string
-	phase   int
-	timeout time.Duration
-	fn      func(context.Context) error
+	name     string
+	phase    int
+	priority int
+	timeout  time.Duration
+	fn       func(context.Context) error
 }
 
 func (f *fakeRegistrar) RegisterCloser(name string, phase int, timeout time.Duration, fn func(context.Context) error) {
 	f.name = name
 	f.phase = phase
+	f.timeout = timeout
+	f.fn = fn
+}
+
+func (f *fakeRegistrar) RegisterCloserWithPriority(name string, phase int, priority int, timeout time.Duration, fn func(context.Context) error) {
+	f.name = name
+	f.phase = phase
+	f.priority = priority
 	f.timeout = timeout
 	f.fn = fn
 }
@@ -71,6 +80,9 @@ func TestRegisterWithManager_Registers(t *testing.T) {
 	}
 	if reg.timeout != 30*time.Second {
 		t.Errorf("timeout = %v, want 30s (default when 0 passed)", reg.timeout)
+	}
+	if reg.priority != 10 {
+		t.Errorf("priority = %d, want 10", reg.priority)
 	}
 	if reg.fn == nil {
 		t.Fatal("registered fn must not be nil")

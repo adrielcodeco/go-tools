@@ -679,3 +679,95 @@ func TestRequest_StatusErrorWithBody(t *testing.T) {
 		t.Errorf("unexpected decoded body: %+v", out)
 	}
 }
+
+// --- Fix O1: cancelled context emits hook --------------------------------
+
+func TestDo_CancelledContextEmitsHook(t *testing.T) {
+	httpclient.SetHook(nil)
+	defer httpclient.SetHook(nil)
+
+	var hookRecord httpclient.Record
+	var hookCalled bool
+	httpclient.SetHook(func(r httpclient.Record) {
+		hookCalled = true
+		hookRecord = r
+	})
+
+	// Cancel the context before calling Do so the backoff select fires immediately.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Use a server that always returns 500 so a retry is attempted and the
+	// backoff timer select is reached.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	// Cancel the context after the first attempt fires but before the backoff
+	// completes by cancelling it immediately — the select will pick ctx.Done().
+	cancel()
+
+	_, err := httpclient.Do(ctx, "GET", httpclient.RequestOptions{
+		URL: srv.URL,
+		Retry: httpclient.RetryPolicy{
+			MaxAttempts:    3,
+			InitialBackoff: 10 * time.Second, // long enough that cancel wins the select
+		},
+	})
+
+	if err == nil {
+		t.Fatal("expected non-nil error from cancelled context")
+	}
+	if !hookCalled {
+		t.Fatal("expected hook to be called on ctx.Done() cancellation")
+	}
+	if hookRecord.Err == nil {
+		t.Errorf("expected hook Record.Err to be non-nil, got nil")
+	}
+}
+
+// --- Fix D3: ReqHeaders populated in hook record -------------------------
+
+func TestDo_ReqHeadersInRecord(t *testing.T) {
+	httpclient.SetHook(nil)
+	defer httpclient.SetHook(nil)
+
+	var hookRecord httpclient.Record
+	httpclient.SetHook(func(r httpclient.Record) {
+		hookRecord = r
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, `{}`)
+	}))
+	defer srv.Close()
+
+	customHeaders := map[string]string{
+		"Content-Type":  "application/json",
+		"X-Request-ID":  "test-req-42",
+		"Authorization": "Bearer tok",
+	}
+
+	_, err := httpclient.Do(context.Background(), "POST", httpclient.RequestOptions{
+		URL:     srv.URL,
+		Headers: customHeaders,
+		Data:    map[string]any{"k": "v"},
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	if hookRecord.ReqHeaders == nil {
+		t.Fatal("expected Record.ReqHeaders to be non-nil")
+	}
+	for k, want := range customHeaders {
+		got, ok := hookRecord.ReqHeaders[k]
+		if !ok {
+			t.Errorf("Record.ReqHeaders missing key %q", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("Record.ReqHeaders[%q] = %q, want %q", k, got, want)
+		}
+	}
+}

@@ -58,7 +58,7 @@ func Register(mgr *gscore.Manager, name string, client Closer, phase gscore.Phas
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}
-	mgr.RegisterCloser(name, phase, timeout, makeCloseFn(client))
+	mgr.RegisterCloser(name, int(phase), timeout, makeCloseFn(client))
 }
 
 // makeCloseFn wraps client.Close() into a ctx-aware closer. Close runs

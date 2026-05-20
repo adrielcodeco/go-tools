@@ -26,9 +26,10 @@ type Res struct {
 // Incoming is the payload published under the "incoming" key by the
 // Fiber middleware.
 type Incoming struct {
-	Req          *Req   `json:"req"`
-	Res          *Res   `json:"res"`
-	ResponseTime string `json:"responseTime"`
+	Req          *Req    `json:"req"`
+	Res          *Res    `json:"res"`
+	Error        *string `json:"error,omitempty"`
+	ResponseTime string  `json:"responseTime"`
 }
 
 // Outgoing is the payload published under the "outgoing" key by the

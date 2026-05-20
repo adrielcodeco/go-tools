@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	redis "github.com/redis/go-redis/v9"
+	"github.com/redis/rueidis"
 	apm "go.elastic.co/apm/v2"
 	"go.elastic.co/apm/v2/apmtest"
 	"go.uber.org/zap"
@@ -157,6 +159,50 @@ func TestInstrumentRedisErrorPath(t *testing.T) {
 		t.Fatal("expected an error for unsupported client type, got nil")
 	}
 }
+
+func TestInstrumentRueidisDoesNotPanic(t *testing.T) {
+	// stubRueidisClient is a no-op implementation of rueidis.Client that does
+	// not require a live server. It is passed to InstrumentRueidis which wraps
+	// it via rueidisotel.WithClient — the wrapping should complete without error.
+	client := &stubRueidisClient{}
+
+	instrumented := apmcore.InstrumentRueidis(client)
+	if instrumented == nil {
+		t.Fatal("InstrumentRueidis returned nil")
+	}
+}
+
+// stubRueidisClient satisfies rueidis.Client for testing purposes.
+// All methods are no-ops; only the interface is needed to verify wrapping.
+type stubRueidisClient struct{}
+
+func (s *stubRueidisClient) B() rueidis.Builder { return rueidis.Builder{} }
+func (s *stubRueidisClient) Do(_ context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	return rueidis.RedisResult{}
+}
+func (s *stubRueidisClient) DoMulti(_ context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	return nil
+}
+func (s *stubRueidisClient) DoCache(_ context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	return rueidis.RedisResult{}
+}
+func (s *stubRueidisClient) DoMultiCache(_ context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	return nil
+}
+func (s *stubRueidisClient) DoStream(_ context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	return rueidis.RedisResultStream{}
+}
+func (s *stubRueidisClient) DoMultiStream(_ context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
+	return rueidis.MultiRedisResultStream{}
+}
+func (s *stubRueidisClient) Dedicated(fn func(rueidis.DedicatedClient) error) error { return nil }
+func (s *stubRueidisClient) Dedicate() (rueidis.DedicatedClient, func())            { return nil, func() {} }
+func (s *stubRueidisClient) Receive(_ context.Context, subscribe rueidis.Completed, fn func(rueidis.PubSubMessage)) error {
+	return nil
+}
+func (s *stubRueidisClient) Nodes() map[string]rueidis.Client              { return nil }
+func (s *stubRueidisClient) Mode() rueidis.ClientMode                      { return rueidis.ClientModeStandalone }
+func (s *stubRueidisClient) Close()                                        {}
 
 func TestLabelsAndCaptureErrorWithActiveTx(t *testing.T) {
 	_, _, errs := apmtest.WithTransaction(func(ctx context.Context) {

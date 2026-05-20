@@ -379,10 +379,10 @@ func TestRegisterCloserRunsPerPhase(t *testing.T) {
 		HookTimeout:    time.Second,
 		ForceKillAfter: 5 * time.Second,
 	})
-	m.RegisterCloser("c-postdrain", PhasePostDrain, 0, func(context.Context) error {
+	m.RegisterCloser("c-postdrain", int(PhasePostDrain), 0, func(context.Context) error {
 		add("postdrain"); return nil
 	})
-	m.RegisterCloser("c-postdb", PhasePostDB, 0, func(context.Context) error {
+	m.RegisterCloser("c-postdb", int(PhasePostDB), 0, func(context.Context) error {
 		add("postdb"); return nil
 	})
 	m.AddHook(Hook{Name: "h-postdb", Phase: PhasePostDB, Run: func(context.Context) error {
@@ -412,16 +412,16 @@ func TestRegisterCloserTimeoutAndError(t *testing.T) {
 		OnHookError:    func(string, Phase, error) { hookErrCount.Add(1) },
 	})
 	// First closer fails fast; the next must still run.
-	m.RegisterCloser("fail", PhasePostDrain, 50*time.Millisecond, func(context.Context) error {
+	m.RegisterCloser("fail", int(PhasePostDrain), 50*time.Millisecond, func(context.Context) error {
 		return errors.New("boom")
 	})
 	var second atomic.Bool
-	m.RegisterCloser("after", PhasePostDrain, 0, func(context.Context) error {
+	m.RegisterCloser("after", int(PhasePostDrain), 0, func(context.Context) error {
 		second.Store(true); return nil
 	})
 	// Closer that respects its own ctx timeout.
 	var slowDur time.Duration
-	m.RegisterCloser("slow", PhasePostDB, 30*time.Millisecond, func(ctx context.Context) error {
+	m.RegisterCloser("slow", int(PhasePostDB), 30*time.Millisecond, func(ctx context.Context) error {
 		start := time.Now()
 		<-ctx.Done()
 		slowDur = time.Since(start)
@@ -442,10 +442,44 @@ func TestRegisterCloserTimeoutAndError(t *testing.T) {
 	}
 }
 
+func TestRegisterCloserWithPriorityOrder(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	record := func(name string) func(context.Context) error {
+		return func(context.Context) error {
+			mu.Lock()
+			order = append(order, name)
+			mu.Unlock()
+			return nil
+		}
+	}
+
+	m := New(Config{HookTimeout: time.Second, ForceKillAfter: 5 * time.Second})
+	// Register higher priority (10) first — it should still run last.
+	m.RegisterCloserWithPriority("high-prio", int(PhasePostDrain), 10, 0, record("high-prio"))
+	// Register lower priority (0) second — it should run first.
+	m.RegisterCloserWithPriority("low-prio", int(PhasePostDrain), 0, 0, record("low-prio"))
+
+	m.Trigger()
+	if err := m.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	want := []string{"low-prio", "high-prio"}
+	if len(order) != len(want) {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("order[%d] = %q, want %q (full: %v)", i, order[i], want[i], order)
+		}
+	}
+}
+
 func TestRegisterCloserNilFnAndEmptyName(t *testing.T) {
 	m := New(Config{HookTimeout: time.Second, ForceKillAfter: time.Second})
-	m.RegisterCloser("x", PhasePostDB, 0, nil) // dropped
-	m.RegisterCloser("", PhasePostDB, 0, func(context.Context) error { return nil })
+	m.RegisterCloser("x", int(PhasePostDB), 0, nil) // dropped
+	m.RegisterCloser("", int(PhasePostDB), 0, func(context.Context) error { return nil })
 
 	m.Trigger()
 	if err := m.Wait(); err != nil {

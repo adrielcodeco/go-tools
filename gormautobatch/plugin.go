@@ -75,6 +75,10 @@ type Config struct {
 	//       slog.Log(ctx, slogLevel(level), msg, args...)
 	//   }
 	Logger func(level LogLevel, msg string, args ...any)
+
+	// SpanEmitter is called after each batch flush. Wire this to
+	// apmcore.BatchSpanEmitter() to get APM visibility for batched writes.
+	SpanEmitter func(table string, ops int, elapsed time.Duration)
 }
 
 // resolved is the immutable, defaulted form of Config used inside the Plugin.
@@ -86,6 +90,7 @@ type resolved struct {
 	maxBatchSize     int
 	windowDuration   time.Duration
 	logger           func(level LogLevel, msg string, args ...any)
+	spanEmitter      func(table string, ops int, elapsed time.Duration)
 }
 
 func (c Config) resolve() resolved {
@@ -94,6 +99,7 @@ func (c Config) resolve() resolved {
 		maxBatchSize:   c.MaxBatchSize,
 		windowDuration: c.WindowDuration,
 		logger:         c.Logger,
+		spanEmitter:    c.SpanEmitter,
 	}
 	if c.LatencyThreshold != nil {
 		r.thresholdEnabled = true
@@ -194,6 +200,7 @@ func (p *Plugin) Initialize(db *gorm.DB) error {
 // on gscore from gormautobatch.
 type CloserRegistrar interface {
 	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
+	RegisterCloserWithPriority(name string, phase int, priority int, timeout time.Duration, fn func(ctx context.Context) error)
 }
 
 // RegisterWithManager registers p.Close() as a PhasePostDrain closer on mgr.
@@ -215,7 +222,7 @@ func RegisterWithManager(p *Plugin, mgr CloserRegistrar, phase int, timeout time
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
-	mgr.RegisterCloser("autobatch", phase, timeout, func(_ context.Context) error {
+	mgr.RegisterCloserWithPriority("autobatch", phase, 10, timeout, func(_ context.Context) error {
 		p.Close()
 		return nil
 	})

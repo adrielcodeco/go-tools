@@ -352,15 +352,24 @@ func TestBaseDB(t *testing.T) {
 
 // fakeRegistrar implements CloserRegistrar and captures the registered closer.
 type fakeRegistrar struct {
-	name    string
-	phase   int
-	timeout time.Duration
-	fn      func(ctx context.Context) error
+	name     string
+	phase    int
+	priority int
+	timeout  time.Duration
+	fn       func(ctx context.Context) error
 }
 
 func (r *fakeRegistrar) RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error) {
 	r.name = name
 	r.phase = phase
+	r.timeout = timeout
+	r.fn = fn
+}
+
+func (r *fakeRegistrar) RegisterCloserWithPriority(name string, phase int, priority int, timeout time.Duration, fn func(ctx context.Context) error) {
+	r.name = name
+	r.phase = phase
+	r.priority = priority
 	r.timeout = timeout
 	r.fn = fn
 }
@@ -576,5 +585,65 @@ func TestRollback_WgDone_Tracked(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("closer fn did not return — wgDone not called in Rollback tracked path")
+	}
+}
+
+// TestOnCommitCallbackReceivesReqCtx verifies that the *gorm.DB passed to an
+// OnCommit callback carries the context that was passed to Begin, not
+// context.Background().
+func TestOnCommitCallbackReceivesReqCtx(t *testing.T) {
+	db := setupTestDB(t)
+
+	type ctxMarkerKey struct{}
+	markerVal := "request-ctx-marker"
+	reqCtx := context.WithValue(context.Background(), ctxMarkerKey{}, markerVal)
+
+	h := NewHolder(db, 5*time.Second, false, nil)
+	h.Begin(reqCtx)
+
+	var gotCtx context.Context
+	h.AppendOnCommit(func(callbackDB *gorm.DB) error {
+		gotCtx = callbackDB.Statement.Context
+		return nil
+	})
+
+	commitErr, postErr := h.Commit()
+	if commitErr != nil {
+		t.Fatalf("commitErr: %v", commitErr)
+	}
+	if postErr != nil {
+		t.Fatalf("postErr: %v", postErr)
+	}
+
+	if gotCtx == nil {
+		t.Fatal("OnCommit callback did not receive a context")
+	}
+	if got := gotCtx.Value(ctxMarkerKey{}); got != markerVal {
+		t.Errorf("OnCommit DB context does not carry the request context: got %v, want %q", got, markerVal)
+	}
+}
+
+// TestOnCommitCallbackFallsBackToBackground verifies that when Begin was never
+// called, OnCommit callbacks still receive a valid (background) context.
+func TestOnCommitCallbackFallsBackToBackground(t *testing.T) {
+	db := setupTestDB(t)
+	h := NewHolder(db, 5*time.Second, false, nil)
+
+	var gotCtx context.Context
+	h.AppendOnCommit(func(callbackDB *gorm.DB) error {
+		gotCtx = callbackDB.Statement.Context
+		return nil
+	})
+
+	commitErr, postErr := h.Commit()
+	if commitErr != nil {
+		t.Fatalf("commitErr: %v", commitErr)
+	}
+	if postErr != nil {
+		t.Fatalf("postErr: %v", postErr)
+	}
+
+	if gotCtx == nil {
+		t.Fatal("OnCommit callback did not receive a context")
 	}
 }

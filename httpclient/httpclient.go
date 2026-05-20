@@ -241,7 +241,9 @@ func Do(ctx context.Context, method string, opts RequestOptions) ([]byte, error)
 			case <-t.C:
 			case <-ctx.Done():
 				t.Stop()
-				return body, ctx.Err()
+				ctxErr := ctx.Err()
+				emitHook(ctx, method, opts.URL, opts.Headers, nil, nil, 0, 0, ctxErr, attempt)
+				return body, ctxErr
 			}
 		}
 		backoff = nextBackoff(backoff, mult, opts.Retry.MaxBackoff)
@@ -290,7 +292,7 @@ func doOnce(ctx context.Context, method string, opts RequestOptions, attempt int
 
 	finalURL, err := formatURL(opts.URL, opts.QueryString)
 	if err != nil {
-		emitHook(ctx, method, opts.URL, nil, nil, 0, 0, err, attempt)
+		emitHook(ctx, method, opts.URL, opts.Headers, nil, nil, 0, 0, err, attempt)
 		return nil, err
 	}
 	req.SetRequestURI(finalURL)
@@ -298,7 +300,7 @@ func doOnce(ctx context.Context, method string, opts RequestOptions, attempt int
 
 	body, err := encodeBody(opts.Data, opts.Headers)
 	if err != nil {
-		emitHook(ctx, method, finalURL, nil, nil, 0, 0, err, attempt)
+		emitHook(ctx, method, finalURL, opts.Headers, nil, nil, 0, 0, err, attempt)
 		return nil, err
 	}
 	if body != nil {
@@ -326,35 +328,32 @@ func doOnce(ctx context.Context, method string, opts RequestOptions, attempt int
 	status := resp.StatusCode()
 
 	if callErr != nil {
-		emitHook(ctx, method, finalURL, body, respBody, status, elapsed, callErr, attempt)
+		emitHook(ctx, method, finalURL, opts.Headers, body, respBody, status, elapsed, callErr, attempt)
 		return respBody, callErr
 	}
 
 	if status < 200 || status >= 300 {
 		se := &StatusError{Method: method, URL: finalURL, StatusCode: status, Body: respBody}
-		emitHook(ctx, method, finalURL, body, respBody, status, elapsed, se, attempt)
+		emitHook(ctx, method, finalURL, opts.Headers, body, respBody, status, elapsed, se, attempt)
 		return respBody, se
 	}
 
-	emitHook(ctx, method, finalURL, body, respBody, status, elapsed, nil, attempt)
+	emitHook(ctx, method, finalURL, opts.Headers, body, respBody, status, elapsed, nil, attempt)
 	return respBody, nil
 }
 
-func emitHook(ctx context.Context, method, urlStr string, reqBody, resBody []byte, status int, dur time.Duration, err error, attempt int) {
+func emitHook(ctx context.Context, method, urlStr string, reqHeaders map[string]string, reqBody, resBody []byte, status int, dur time.Duration, err error, attempt int) {
 	h := currentHook()
 	if h == nil {
 		return
 	}
-	// Build a copy of headers from the *fasthttp.Request would require us
-	// to keep the req alive; we already have the body bytes, so callers
-	// usually pair Record with what they already know. Pass nil to keep
-	// the hook contract small; future versions can enrich it.
 	h(Record{
 		Ctx:          ctx,
 		Method:       method,
 		URL:          urlStr,
 		Status:       status,
 		ResponseTime: dur,
+		ReqHeaders:   reqHeaders,
 		ReqBody:      reqBody,
 		ResBody:      resBody,
 		Err:          err,

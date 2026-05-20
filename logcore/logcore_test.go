@@ -631,3 +631,93 @@ func TestFlattenHeaders_DuplicateKeys(t *testing.T) {
 		t.Errorf("expected joined value, got %q", m["X-Multi"])
 	}
 }
+
+// ---------------------------------------------------------------------------
+// GSCoreLogger tests
+// ---------------------------------------------------------------------------
+
+func newObservedLogger(level zapcore.Level) (*logcore.Logger, *observer.ObservedLogs) {
+	core, logs := observer.New(level)
+	return &logcore.Logger{Logger: zap.New(core)}, logs
+}
+
+func TestGSCoreLogger_Info(t *testing.T) {
+	l, logs := newObservedLogger(zapcore.DebugLevel)
+	gl := logcore.GSCoreLogger(l)
+	gl.Info("info-msg", "key", "val")
+
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 entry, got %d", logs.Len())
+	}
+	e := logs.All()[0]
+	if e.Level != zapcore.InfoLevel {
+		t.Errorf("expected InfoLevel, got %v", e.Level)
+	}
+	if e.Message != "info-msg" {
+		t.Errorf("expected message %q, got %q", "info-msg", e.Message)
+	}
+}
+
+func TestGSCoreLogger_Warn(t *testing.T) {
+	l, logs := newObservedLogger(zapcore.DebugLevel)
+	gl := logcore.GSCoreLogger(l)
+	gl.Warn("warn-msg", "k", "v")
+
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 entry, got %d", logs.Len())
+	}
+	e := logs.All()[0]
+	if e.Level != zapcore.WarnLevel {
+		t.Errorf("expected WarnLevel, got %v", e.Level)
+	}
+	if e.Message != "warn-msg" {
+		t.Errorf("expected message %q, got %q", "warn-msg", e.Message)
+	}
+}
+
+func TestGSCoreLogger_Error(t *testing.T) {
+	l, logs := newObservedLogger(zapcore.DebugLevel)
+	gl := logcore.GSCoreLogger(l)
+	gl.Error("error-msg", "errKey", "errVal")
+
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 entry, got %d", logs.Len())
+	}
+	e := logs.All()[0]
+	if e.Level != zapcore.ErrorLevel {
+		t.Errorf("expected ErrorLevel, got %v", e.Level)
+	}
+	if e.Message != "error-msg" {
+		t.Errorf("expected message %q, got %q", "error-msg", e.Message)
+	}
+}
+
+func TestGSCoreLogger_NilUsesGlobal(t *testing.T) {
+	nopCore, _ := observer.New(zap.InfoLevel)
+	nopLog := &logcore.Logger{Logger: zap.New(nopCore)}
+	logcore.SetGlobal(nopLog)
+	defer logcore.SetGlobal(nil)
+
+	// Must not panic.
+	gl := logcore.GSCoreLogger(nil)
+	gl.Info("nil-global-info")
+	gl.Warn("nil-global-warn")
+	gl.Error("nil-global-error")
+}
+
+func TestGSCoreGlobalLogger(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	l := &logcore.Logger{Logger: zap.New(core)}
+	logcore.SetGlobal(l)
+	defer logcore.SetGlobal(nil)
+
+	gl := logcore.GSCoreGlobalLogger()
+	gl.Info("global-info-msg")
+
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 entry, got %d", logs.Len())
+	}
+	if logs.All()[0].Message != "global-info-msg" {
+		t.Errorf("unexpected message: %q", logs.All()[0].Message)
+	}
+}

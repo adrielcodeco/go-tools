@@ -3,6 +3,7 @@ module github.com/adrielcodeco/go-tools/gormautobatch
 go 1.25.0
 
 require (
+	github.com/adrielcodeco/go-tools v0.0.0
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.30.0
 )
@@ -13,3 +14,5 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.22 // indirect
 	golang.org/x/text v0.36.0 // indirect
 )
+
+replace github.com/adrielcodeco/go-tools => ../

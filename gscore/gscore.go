@@ -206,10 +206,11 @@ func (m *Manager) RegisterDB(db *gorm.DB) {
 
 // closerEntry is a registered Closer with its bookkeeping.
 type closerEntry struct {
-	name    string
-	phase   Phase
-	timeout time.Duration
-	fn      func(ctx context.Context) error
+	name     string
+	phase    Phase
+	priority int
+	timeout  time.Duration
+	fn       func(ctx context.Context) error
 }
 
 // RegisterCloser registers a generic resource close action for the given
@@ -227,7 +228,36 @@ type closerEntry struct {
 //
 // timeout=0 falls back to Config.HookTimeout. Empty name is auto-filled.
 // A nil fn is a no-op (the entry is dropped).
-func (m *Manager) RegisterCloser(name string, phase Phase, timeout time.Duration, fn func(ctx context.Context) error) {
+//
+// phase accepts int so that sub-packages (txcore, apmcore, logcore, gormautobatch)
+// can satisfy the CloserRegistrar interface without importing gscore. Pass the
+// Phase constants as int: int(gscore.PhasePostDrain). For typed usage call
+// RegisterCloserAt instead.
+func (m *Manager) RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error) {
+	m.appendCloser(name, Phase(phase), 0, timeout, fn)
+}
+
+// RegisterCloserAt is like RegisterCloser but accepts the typed Phase constant
+// directly, which is more ergonomic when calling from within the gscore package
+// or from packages that import gscore explicitly.
+func (m *Manager) RegisterCloserAt(name string, phase Phase, timeout time.Duration, fn func(ctx context.Context) error) {
+	m.appendCloser(name, phase, 0, timeout, fn)
+}
+
+// RegisterCloserWithPriority is like RegisterCloser but also sets a priority.
+// Within the same phase, closers with lower priority values run first; closers
+// with equal priorities run in registration order. RegisterCloser uses priority 0.
+func (m *Manager) RegisterCloserWithPriority(name string, phase int, priority int, timeout time.Duration, fn func(ctx context.Context) error) {
+	m.appendCloser(name, Phase(phase), priority, timeout, fn)
+}
+
+// RegisterCloserWithPriorityAt is like RegisterCloserWithPriority but accepts
+// the typed Phase constant directly.
+func (m *Manager) RegisterCloserWithPriorityAt(name string, phase Phase, priority int, timeout time.Duration, fn func(ctx context.Context) error) {
+	m.appendCloser(name, phase, priority, timeout, fn)
+}
+
+func (m *Manager) appendCloser(name string, phase Phase, priority int, timeout time.Duration, fn func(ctx context.Context) error) {
 	if fn == nil {
 		return
 	}
@@ -235,10 +265,11 @@ func (m *Manager) RegisterCloser(name string, phase Phase, timeout time.Duration
 		name = fmt.Sprintf("closer-%d", len(m.closers))
 	}
 	m.closers = append(m.closers, closerEntry{
-		name:    name,
-		phase:   phase,
-		timeout: timeout,
-		fn:      fn,
+		name:     name,
+		phase:    phase,
+		priority: priority,
+		timeout:  timeout,
+		fn:       fn,
 	})
 }
 
@@ -356,6 +387,9 @@ func (m *Manager) runClosers(p Phase) {
 	if len(entries) == 0 {
 		return
 	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].priority < entries[j].priority
+	})
 	m.cfg.Logger.Info("phase begin", "phase", p.String(), "closers", len(entries))
 	start := time.Now()
 	for _, c := range entries {

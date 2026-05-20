@@ -225,6 +225,11 @@ func makeFlush(rootDB *gorm.DB, lat *window, cfg *resolved, opFn func(base *gorm
 			)
 		}
 
+		if cfg.spanEmitter != nil && len(active) > 0 {
+			table := active[0].table
+			cfg.spanEmitter(table, len(active), elapsed)
+		}
+
 		for _, op := range cancelled {
 			op.err = op.ctx.Err()
 			close(op.done)
