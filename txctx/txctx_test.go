@@ -353,7 +353,7 @@ func TestMultipleWritesSameTxAllCommit(t *testing.T) {
 
 	app := newApp(db, txctx.Config{LazyTx: txctx.BoolPtr(false)}, http.MethodPost, func(c *fiber.Ctx) error {
 		txDB := txctx.DBFromCtx(c.UserContext())
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			if err := txDB.Create(&Item{Name: fmt.Sprintf("multi-%d", i)}).Error; err != nil {
 				return err
 			}
@@ -375,7 +375,7 @@ func TestMultipleWritesSameTxAllRollback(t *testing.T) {
 
 	app := newApp(db, txctx.Config{LazyTx: txctx.BoolPtr(false)}, http.MethodPost, func(c *fiber.Ctx) error {
 		txDB := txctx.DBFromCtx(c.UserContext())
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			if err := txDB.Create(&Item{Name: fmt.Sprintf("rollback-multi-%d", i)}).Error; err != nil {
 				return err
 			}
@@ -428,6 +428,53 @@ func TestMustHolderPanics(t *testing.T) {
 		}
 	}()
 	_ = txctx.DBFromCtx(context.Background())
+}
+
+type testKey struct{}
+
+func TestContextExtractor_PropagatesValue(t *testing.T) {
+	db := setupTestDB(t)
+
+	sentinelCtx := context.WithValue(context.Background(), testKey{}, "sentinel")
+
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		},
+	})
+
+	var capturedVal any
+
+	extractor := func(c *fiber.Ctx) context.Context { return sentinelCtx }
+	app.Post("/test", txctx.Middleware(db, txctx.Config{LazyTx: txctx.BoolPtr(true)}, extractor), func(c *fiber.Ctx) error {
+		capturedVal = c.UserContext().Value(testKey{})
+		return c.SendStatus(fiber.StatusOK)
+	})
+
+	resp := doRequest(app, http.MethodPost)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("unexpected status %d", resp.StatusCode)
+	}
+	if capturedVal != "sentinel" {
+		t.Errorf("expected context value %q, got %v", "sentinel", capturedVal)
+	}
+}
+
+func TestContextExtractor_NilUsesDefault(t *testing.T) {
+	db := setupTestDB(t)
+
+	// No extractor — default c.UserContext() path; a normal write must still commit.
+	app := newApp(db, txctx.Config{LazyTx: txctx.BoolPtr(true)}, http.MethodPost, func(c *fiber.Ctx) error {
+		return txctx.DBFromCtx(c.UserContext()).Create(&Item{Name: "extractor-nil"}).Error
+	})
+
+	resp := doRequest(app, http.MethodPost)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("unexpected status %d", resp.StatusCode)
+	}
+	if !itemExists(t, db, "extractor-nil") {
+		t.Error("record should persist when no extractor is provided")
+	}
 }
 
 func TestFiberCtxWrappers(t *testing.T) {

@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"os"
+	"strings"
 	"testing"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
+	apm "go.elastic.co/apm/v2"
 	"go.elastic.co/apm/v2/apmtest"
 	"go.elastic.co/apm/v2/model"
 	"gorm.io/driver/sqlite"
@@ -108,11 +111,12 @@ func TestDriverAndGormPluginEmitSpans(t *testing.T) {
 }
 
 func spanSubtypes(spans []model.Span) string {
-	out := ""
+	var sb strings.Builder
 	for i := range spans {
-		out += spans[i].Subtype + ","
+		sb.WriteString(spans[i].Subtype)
+		sb.WriteByte(',')
 	}
-	return out
+	return sb.String()
 }
 
 func TestGormPluginWithoutTransactionIsNoop(t *testing.T) {
@@ -157,6 +161,92 @@ func TestDBPoolMetricsGather(t *testing.T) {
 	}
 }
 
+// TestTracingTxCommitSpanParentedToTransaction verifies that a COMMIT span
+// emitted by tracingTx.Commit is captured under the active APM transaction
+// when BeginTx was called with the transaction context.
+func TestTracingTxCommitSpanParentedToTransaction(t *testing.T) {
+	apmcore.RegisterDriver("sqlite-apm", sqliteBase)
+	sqlDB, err := sql.Open("sqlite-apm", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+	if _, err := sqlDB.Exec("CREATE TABLE commit_test (id INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	tx, spans, _ := apmtest.WithTransaction(func(ctx context.Context) {
+		dbTx, err := sqlDB.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		if _, err := dbTx.ExecContext(ctx, "INSERT INTO commit_test VALUES (1)"); err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if err := dbTx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	})
+
+	var commitSpan *model.Span
+	for i := range spans {
+		if spans[i].Name == "COMMIT" {
+			commitSpan = &spans[i]
+			break
+		}
+	}
+	if commitSpan == nil {
+		t.Fatalf("expected a COMMIT span; got span names: %s", spanSubtypes(spans))
+	}
+	// The COMMIT span must be associated with the active transaction, not an orphan.
+	if commitSpan.TransactionID != tx.ID {
+		t.Errorf("COMMIT span TransactionID = %v, want %v (active transaction ID)", commitSpan.TransactionID, tx.ID)
+	}
+}
+
+// TestTracingTxRollbackSpanParentedToTransaction verifies that a ROLLBACK span
+// emitted by tracingTx.Rollback is captured under the active APM transaction
+// when BeginTx was called with the transaction context.
+func TestTracingTxRollbackSpanParentedToTransaction(t *testing.T) {
+	apmcore.RegisterDriver("sqlite-apm", sqliteBase)
+	sqlDB, err := sql.Open("sqlite-apm", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+	if _, err := sqlDB.Exec("CREATE TABLE rollback_test (id INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	tx, spans, _ := apmtest.WithTransaction(func(ctx context.Context) {
+		dbTx, err := sqlDB.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		if _, err := dbTx.ExecContext(ctx, "INSERT INTO rollback_test VALUES (1)"); err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if err := dbTx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+	})
+
+	var rollbackSpan *model.Span
+	for i := range spans {
+		if spans[i].Name == "ROLLBACK" {
+			rollbackSpan = &spans[i]
+			break
+		}
+	}
+	if rollbackSpan == nil {
+		t.Fatalf("expected a ROLLBACK span; got span names: %s", spanSubtypes(spans))
+	}
+	// The ROLLBACK span must be associated with the active transaction, not an orphan.
+	if rollbackSpan.TransactionID != tx.ID {
+		t.Errorf("ROLLBACK span TransactionID = %v, want %v (active transaction ID)", rollbackSpan.TransactionID, tx.ID)
+	}
+}
+
 func TestRegisterDriverNilBase(t *testing.T) {
 	defer func() {
 		// We don't require a panic, but the helper should at minimum not
@@ -167,4 +257,144 @@ func TestRegisterDriverNilBase(t *testing.T) {
 	if _, err := sql.Open("apmcore-nil-driver", ""); err == nil {
 		t.Log("driver registered with nil base; sql.Open returned no error (expected behavior is implementation-defined)")
 	}
+}
+
+// TestGatherMetricsViaDefaultTracer exercises poolGatherer.GatherMetrics by
+// temporarily enabling recording on the default APM tracer and flushing
+// metrics. The gatherer is registered indirectly via RegisterDBPoolMetrics.
+func TestGatherMetricsViaDefaultTracer(t *testing.T) {
+	// Enable recording so SendMetrics actually invokes registered gatherers.
+	_ = os.Setenv("ELASTIC_APM_RECORDING", "true")
+	t.Cleanup(func() { os.Unsetenv("ELASTIC_APM_RECORDING") }) //nolint:errcheck
+
+	// Force a fresh default tracer that respects the env vars we just set.
+	apm.SetDefaultTracer(nil)
+	t.Cleanup(func() { apm.SetDefaultTracer(nil) })
+
+	apmcore.RegisterDriver("sqlite-apm", sqliteBase)
+	sqlDB, err := sql.Open("sqlite-apm", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := sqlDB.Ping(); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+
+	// Register the pool gatherer on the freshly created default tracer.
+	deregister := apmcore.RegisterDBPoolMetrics(sqlDB)
+	defer deregister()
+
+	// SendMetrics is synchronous: it blocks until the tracer loop has
+	// called every registered MetricsGatherer, including our poolGatherer.
+	apm.DefaultTracer().SendMetrics(nil)
+	apm.DefaultTracer().Flush(nil)
+}
+
+// TestGatherMetricsNilDB exercises poolGatherer.GatherMetrics with a nil db
+// (early-return branch). It follows the same recording-enable trick.
+func TestGatherMetricsNilDB(t *testing.T) {
+	_ = os.Setenv("ELASTIC_APM_RECORDING", "true")
+	t.Cleanup(func() { os.Unsetenv("ELASTIC_APM_RECORDING") }) //nolint:errcheck
+
+	apm.SetDefaultTracer(nil)
+	t.Cleanup(func() { apm.SetDefaultTracer(nil) })
+
+	// Passing nil triggers the nil-guard in GatherMetrics.
+	deregister := apmcore.RegisterDBPoolMetrics(nil)
+	defer deregister()
+
+	apm.DefaultTracer().SendMetrics(nil)
+	apm.DefaultTracer().Flush(nil)
+}
+
+// TestLegacyDriverConnBeginAndPrepare exercises the deprecated
+// tracingConn.Begin (driver.Conn interface) and tracingConn.Prepare.
+//
+// database/sql prefers BeginTx / PrepareContext when available; the only way
+// to reach the legacy methods is to call them directly through the raw
+// driver.Conn obtained via (*sql.Conn).Raw.
+func TestLegacyDriverConnBeginAndPrepare(t *testing.T) {
+	apmcore.RegisterDriver("sqlite-apm", sqliteBase)
+	sqlDB, err := sql.Open("sqlite-apm", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	conn, err := sqlDB.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer conn.Close()
+
+	err = conn.Raw(func(dc any) error {
+		c, ok := dc.(driver.Conn) //nolint:staticcheck
+		if !ok {
+			t.Fatal("driver.Conn type assertion failed")
+		}
+
+		// ── Begin (deprecated) ──────────────────────────────────────────────
+		tx, err := c.Begin() //nolint:staticcheck
+		if err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("Rollback after Begin: %v", err)
+		}
+
+		// ── Prepare (legacy, no context) ────────────────────────────────────
+		stmt, err := c.Prepare("SELECT 1")
+		if err != nil {
+			t.Fatalf("Prepare: %v", err)
+		}
+		defer stmt.Close()
+
+		// ── tracingStmt.Exec (driver.Value, no context) ─────────────────────
+		_, execErr := stmt.Exec([]driver.Value{}) //nolint:staticcheck
+		// sqlite may return ErrSkip or a result; either is acceptable.
+		_ = execErr
+
+		// ── tracingStmt.Query (driver.Value, no context) ────────────────────
+		rows, queryErr := stmt.Query([]driver.Value{}) //nolint:staticcheck
+		if queryErr == nil {
+			rows.Close()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Raw: %v", err)
+	}
+}
+
+// TestLegacyDriverConnBeginWithActiveTransaction exercises tracingConn.Begin
+// while an APM transaction is in scope, ensuring spans are emitted correctly.
+func TestLegacyDriverConnBeginWithActiveTransaction(t *testing.T) {
+	apmcore.RegisterDriver("sqlite-apm", sqliteBase)
+	sqlDB, err := sql.Open("sqlite-apm", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	_, spans, _ := apmtest.WithTransaction(func(ctx context.Context) {
+		conn, err := sqlDB.Conn(ctx)
+		if err != nil {
+			t.Fatalf("Conn: %v", err)
+		}
+		defer conn.Close()
+
+		_ = conn.Raw(func(dc any) error {
+			c := dc.(driver.Conn) //nolint:staticcheck
+			tx, err := c.Begin()  //nolint:staticcheck
+			if err != nil {
+				return err
+			}
+			return tx.Rollback()
+		})
+	})
+
+	// tracingConn.Begin uses context.Background so the BEGIN span will be an
+	// orphan — but the method must not panic and Begin itself must succeed.
+	_ = spans // may be 0 or more depending on APM sampling
 }

@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/adrielcodeco/go-tools/apmcore v0.0.0
 	github.com/gofiber/fiber/v3 v3.2.0
-	github.com/valyala/fasthttp v1.70.0
+	github.com/valyala/fasthttp v1.71.0
 	go.elastic.co/apm/module/apmfasthttp/v2 v2.7.1
 	go.elastic.co/apm/module/apmhttp/v2 v2.7.1
 	go.elastic.co/apm/v2 v2.7.1
@@ -26,7 +26,7 @@ require (
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/joeshaw/multierror v0.0.0-20140124173710-69b34d4ec901 // indirect
-	github.com/klauspost/compress v1.18.5 // indirect
+	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.21 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect

@@ -150,14 +150,31 @@ func currentClient() *fasthttp.Client {
 	return clientPtr.Load()
 }
 
-// SetHook installs a global hook called after every attempt. Pass nil
-// to disable.
+// SetHook installs a global hook called after every attempt, replacing any
+// previously installed hook. Pass nil to disable.
+// To add a hook without removing an existing one, use AddHook instead.
 func SetHook(h Hook) {
 	if h == nil {
 		hookPtr.Store(nil)
 		return
 	}
 	hookPtr.Store(&h)
+}
+
+// AddHook appends h to the current hook chain. If no hook is installed,
+// h becomes the sole hook. Subsequent calls compose without dropping prior
+// hooks — safe to call multiple times at boot (e.g. log hook + audit hook).
+func AddHook(h Hook) {
+	if h == nil {
+		return
+	}
+	prev := currentHook()
+	if prev == nil {
+		SetHook(h)
+		return
+	}
+	combined := Hook(func(r Record) { prev(r); h(r) })
+	hookPtr.Store(&combined)
 }
 
 func currentHook() Hook {

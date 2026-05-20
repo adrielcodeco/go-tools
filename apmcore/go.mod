@@ -1,11 +1,12 @@
 module github.com/adrielcodeco/go-tools/apmcore
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/redis/go-redis/extra/redisotel/v9 v9.16.0
 	github.com/redis/go-redis/v9 v9.16.0
+	github.com/valyala/fasthttp v1.71.0
 	go.elastic.co/apm/module/apmhttp/v2 v2.7.1
 	go.elastic.co/apm/module/apmotel/v2 v2.7.1
 	go.elastic.co/apm/module/apmsql/v2 v2.7.1
@@ -38,17 +39,17 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/procfs v0.7.3 // indirect
 	github.com/redis/go-redis/extra/rediscmd/v9 v9.16.0 // indirect
+	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
-	github.com/valyala/fasthttp v1.71.0 // indirect
 	go.elastic.co/fastjson v1.5.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/otel/metric v1.38.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.38.0 // indirect
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	howett.net/plist v1.0.0 // indirect
 )

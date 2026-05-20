@@ -60,3 +60,15 @@ func HookFor(l *Logger) httpclient.Hook {
 		logger.Info(msg, zap.Any("outgoing", out), zap.Int("attempt", r.Attempt))
 	}
 }
+
+// InstallHTTPClientHook adds the global-logger hook to the httpclient hook
+// chain. Uses AddHook (not SetHook) so it composes with any previously
+// installed hook. Call once at boot.
+func InstallHTTPClientHook() {
+	httpclient.AddHook(HTTPClientHook())
+}
+
+// InstallHTTPClientHookFor is InstallHTTPClientHook bound to l.
+func InstallHTTPClientHookFor(l *Logger) {
+	httpclient.AddHook(HookFor(l))
+}

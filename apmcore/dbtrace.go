@@ -74,7 +74,7 @@ func (c *tracingConn) Begin() (driver.Tx, error) { //nolint:staticcheck
 	if err != nil {
 		return nil, err
 	}
-	return &tracingTx{tx: tx}, nil
+	return &tracingTx{tx: tx, ctx: context.Background()}, nil
 }
 
 func (c *tracingConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
@@ -85,14 +85,14 @@ func (c *tracingConn) BeginTx(ctx context.Context, opts driver.TxOptions) (drive
 		if err != nil {
 			return nil, err
 		}
-		return &tracingTx{tx: tx}, nil
+		return &tracingTx{tx: tx, ctx: ctx}, nil
 	}
 	tx, err := c.conn.Begin() //nolint:staticcheck
 	endSpan(span, err)
 	if err != nil {
 		return nil, err
 	}
-	return &tracingTx{tx: tx}, nil
+	return &tracingTx{tx: tx, ctx: ctx}, nil
 }
 
 func (c *tracingConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
@@ -223,17 +223,20 @@ func (s *tracingStmt) QueryContext(ctx context.Context, args []driver.NamedValue
 
 // --- tx wrapper -----------------------------------------------------------
 
-type tracingTx struct{ tx driver.Tx }
+type tracingTx struct {
+	tx  driver.Tx
+	ctx context.Context
+}
 
 func (t *tracingTx) Commit() error {
-	span, _ := startDBSpan(context.Background(), "COMMIT", "db.postgresql.commit")
+	span, _ := startDBSpan(t.ctx, "COMMIT", "db.postgresql.commit")
 	err := t.tx.Commit()
 	endSpan(span, err)
 	return err
 }
 
 func (t *tracingTx) Rollback() error {
-	span, _ := startDBSpan(context.Background(), "ROLLBACK", "db.postgresql.rollback")
+	span, _ := startDBSpan(t.ctx, "ROLLBACK", "db.postgresql.rollback")
 	err := t.tx.Rollback()
 	endSpan(span, err)
 	return err
@@ -322,6 +325,12 @@ type gormSpanKey struct{}
 func startGormSpan(op string) func(*gorm.DB) {
 	return func(tx *gorm.DB) {
 		if tx.Statement == nil || tx.Statement.Context == nil {
+			return
+		}
+		// Skip when a prior callback (e.g. gormautobatch) has already set an
+		// error to short-circuit the core callback. Starting a span here would
+		// produce a dangling span that endGormSpan would end with a false error.
+		if tx.Error != nil {
 			return
 		}
 		ctx := tx.Statement.Context

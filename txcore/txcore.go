@@ -10,12 +10,58 @@ package txcore
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm"
 )
 
 type ctxKey struct{}
+
+// activeWg tracks holders that have been started but not yet finished
+// (committed or rolled back, including compensation callbacks).
+// Only active after RegisterWithManager is called.
+var (
+	activeWg      sync.WaitGroup
+	trackingActive atomic.Bool
+)
+
+func wgAdd() {
+	if trackingActive.Load() {
+		activeWg.Add(1)
+	}
+}
+func wgDone() {
+	if trackingActive.Load() {
+		activeWg.Done()
+	}
+}
+
+// CloserRegistrar is the subset of gscore.Manager used by RegisterWithManager.
+// Accepting an interface instead of the concrete *gscore.Manager avoids a hard
+// dependency on gscore from txcore.
+type CloserRegistrar interface {
+	RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error)
+}
+
+// RegisterWithManager registers a PhasePostDrain closer that blocks until all
+// active transaction holders (including their compensation callbacks) finish.
+// This prevents gscore's PhaseDB from closing the *sql.DB while OnRollback or
+// OnCommit callbacks are still issuing queries.
+//
+// Calling this also activates per-holder WaitGroup tracking: every subsequent
+// NewHolder call contributes to the counter, and Commit/Rollback decrements it.
+//
+// phase must be gscore.PhasePostDrain (value 2).
+//
+//	txcore.RegisterWithManager(mgr, gscore.PhasePostDrain, 35*time.Second)
+func RegisterWithManager(mgr CloserRegistrar, phase int, timeout time.Duration) {
+	trackingActive.Store(true)
+	mgr.RegisterCloser("txcore-drain", phase, timeout, func(_ context.Context) error {
+		activeWg.Wait()
+		return nil
+	})
+}
 
 // Holder is the request-scoped transaction state.
 type Holder struct {
@@ -24,22 +70,31 @@ type Holder struct {
 	tx              *gorm.DB
 	started         bool
 	committed       bool
+	tracked         bool // true when Track() was called; gates wgDone() in Commit/Rollback
 	onRollback      []func(*gorm.DB) error
 	onCommit        []func(*gorm.DB) error
 	compensCtx      time.Duration
 	lazy            bool
 	onCallbackError func(error)
+	reqCtx          context.Context // set on first Begin; used for OnCommit callback DB
 }
 
 // NewHolder constructs a Holder. The caller (middleware) is responsible for
-// placing it in a context via Inject.
+// placing it in a context via Inject. When RegisterWithManager has been called,
+// the holder automatically registers with the global WaitGroup and Commit /
+// Rollback will decrement it after compensation callbacks finish.
 func NewHolder(db *gorm.DB, compensCtx time.Duration, lazy bool, onErr func(error)) *Holder {
-	return &Holder{
+	h := &Holder{
 		db:              db,
 		compensCtx:      compensCtx,
 		lazy:            lazy,
 		onCallbackError: onErr,
 	}
+	if trackingActive.Load() {
+		h.tracked = true
+		wgAdd()
+	}
+	return h
 }
 
 // Inject returns a new context carrying h.
@@ -70,6 +125,7 @@ func (h *Holder) Begin(ctx context.Context) {
 	if h.started {
 		return
 	}
+	h.reqCtx = ctx
 	h.tx = h.db.WithContext(ctx).Begin()
 	h.started = true
 }
@@ -84,6 +140,7 @@ func (h *Holder) Rollback() {
 	callbacks := h.onRollback
 	onErr := h.onCallbackError
 	compensCtx := h.compensCtx
+	tracked := h.tracked
 	h.mu.Unlock()
 
 	if started && tx != nil && !committed {
@@ -100,6 +157,10 @@ func (h *Holder) Rollback() {
 			onErr(err)
 		}
 	}
+
+	if tracked {
+		wgDone()
+	}
 }
 
 // Commit returns (commitErr, postCommitErr). commitErr is set if tx.Commit
@@ -112,12 +173,16 @@ func (h *Holder) Commit() (commitErr error, postCommitErr error) {
 	started := h.started
 	callbacks := h.onCommit
 	onErr := h.onCallbackError
+	tracked := h.tracked
 	h.mu.Unlock()
 
 	bg := h.db.WithContext(context.Background())
 
 	if started && tx != nil {
 		if err := tx.Commit().Error; err != nil {
+			if tracked {
+				wgDone()
+			}
 			return err, nil
 		}
 		h.mu.Lock()
@@ -130,8 +195,14 @@ func (h *Holder) Commit() (commitErr error, postCommitErr error) {
 			if onErr != nil {
 				onErr(err)
 			}
+			if tracked {
+				wgDone()
+			}
 			return nil, err
 		}
+	}
+	if tracked {
+		wgDone()
 	}
 	return nil, nil
 }

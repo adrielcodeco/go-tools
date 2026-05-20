@@ -1,6 +1,6 @@
 module github.com/adrielcodeco/go-tools/httpclient
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/adrielcodeco/go-tools/apmcore v0.0.0
@@ -48,8 +48,8 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
-	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	gorm.io/gorm v1.30.0 // indirect
 	howett.net/plist v1.0.0 // indirect
 )

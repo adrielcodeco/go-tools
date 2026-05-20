@@ -3,6 +3,7 @@ package logfiber_test
 import (
 	"bytes"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -88,5 +89,406 @@ func TestSkipPaths(t *testing.T) {
 	}
 	if logs.Len() != 1 {
 		t.Fatalf("expected 1 log (only /something), got %d", logs.Len())
+	}
+}
+
+func TestSkipFunc_SkipsMatchingPath(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{
+		Logger:    l,
+		SkipPaths: []string{}, // override defaults so only SkipFunc applies
+		SkipFunc:  func(p string) bool { return strings.HasPrefix(p, "/internal") },
+	}))
+	app.Get("/internal/health", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	if _, err := app.Test(httptest.NewRequest("GET", "/internal/health", nil)); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("expected 0 logs (path skipped by SkipFunc), got %d", logs.Len())
+	}
+}
+
+func TestSkipFunc_DoesNotSkipNonMatching(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{
+		Logger:    l,
+		SkipPaths: []string{},
+		SkipFunc:  func(p string) bool { return strings.HasPrefix(p, "/internal") },
+	}))
+	app.Get("/api/users", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	if _, err := app.Test(httptest.NewRequest("GET", "/api/users", nil)); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log for non-matching path, got %d", logs.Len())
+	}
+}
+
+func TestSkipFunc_ComposesWithSkipPaths(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{
+		Logger:    l,
+		SkipPaths: []string{"/health"},
+		SkipFunc:  func(p string) bool { return p == "/metrics" },
+	}))
+	app.Get("/health", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+	app.Get("/metrics", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+	app.Get("/api", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	for _, path := range []string{"/health", "/metrics", "/api"} {
+		if _, err := app.Test(httptest.NewRequest("GET", path, nil)); err != nil {
+			t.Fatalf("Test %s: %v", path, err)
+		}
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log (only /api), got %d", logs.Len())
+	}
+	if entry := logs.AllUntimed()[0]; entry.Message != "→ incoming → [GET] /api - 200" {
+		t.Errorf("unexpected log message: %q", entry.Message)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// getReqParams coverage
+// ---------------------------------------------------------------------------
+
+func TestGetReqParams_WithRouteParam(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Get("/users/:id", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	if _, err := app.Test(httptest.NewRequest("GET", "/users/42", nil)); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+	var inc *logcore.Incoming
+	for _, f := range entry.Context {
+		if f.Key == "incoming" {
+			v := f.Interface.(logcore.Incoming)
+			inc = &v
+			break
+		}
+	}
+	if inc == nil {
+		t.Fatal("missing incoming field")
+	}
+	if inc.Req.Params == nil {
+		t.Error("expected route params to be captured")
+	}
+	params, ok := inc.Req.Params.(map[string]string)
+	if !ok {
+		t.Fatalf("expected map[string]string params, got %T", inc.Req.Params)
+	}
+	if params["id"] != "42" {
+		t.Errorf("expected params[id]=42, got %q", params["id"])
+	}
+}
+
+func TestGetReqParams_NoParams(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Get("/status", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	if _, err := app.Test(httptest.NewRequest("GET", "/status", nil)); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+	var inc *logcore.Incoming
+	for _, f := range entry.Context {
+		if f.Key == "incoming" {
+			v := f.Interface.(logcore.Incoming)
+			inc = &v
+			break
+		}
+	}
+	if inc == nil {
+		t.Fatal("missing incoming field")
+	}
+	if inc.Req.Params != nil {
+		t.Errorf("expected nil params for route without params, got %v", inc.Req.Params)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// getReqHeaders coverage
+// ---------------------------------------------------------------------------
+
+func TestGetReqHeaders_RequestProcessed(t *testing.T) {
+	// getReqHeaders in logfiber v2 uses ReqHeaderParser which requires a struct,
+	// not a map — so it always returns nil and the incoming.Req.Headers field is nil.
+	// This test verifies the middleware still logs the request correctly regardless.
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Get("/ping", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest("GET", "/ping", nil)
+	req.Header.Set("X-Request-ID", "req-123")
+	req.Header.Set("Accept", "application/json")
+
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+	var inc *logcore.Incoming
+	for _, f := range entry.Context {
+		if f.Key == "incoming" {
+			v := f.Interface.(logcore.Incoming)
+			inc = &v
+			break
+		}
+	}
+	if inc == nil {
+		t.Fatal("missing incoming field")
+	}
+	// ReqHeaderParser with map always errors → headers nil, request still logged
+	_ = inc.Req.Headers
+}
+
+// ---------------------------------------------------------------------------
+// getReqBody coverage
+// ---------------------------------------------------------------------------
+
+func TestGetReqBody_WithJSONBody(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Post("/data", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest("POST", "/data", bytes.NewReader([]byte(`{"key":"value","num":42}`)))
+	req.Header.Set("Content-Type", "application/json")
+
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+	var inc *logcore.Incoming
+	for _, f := range entry.Context {
+		if f.Key == "incoming" {
+			v := f.Interface.(logcore.Incoming)
+			inc = &v
+			break
+		}
+	}
+	if inc == nil {
+		t.Fatal("missing incoming field")
+	}
+	if inc.Req.Body == nil {
+		t.Error("expected request body to be captured")
+	}
+	body, ok := inc.Req.Body.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map body, got %T", inc.Req.Body)
+	}
+	if body["key"] != "value" {
+		t.Errorf("expected body[key]=value, got %v", body["key"])
+	}
+}
+
+func TestGetReqBody_NoBody(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Get("/items", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	if _, err := app.Test(httptest.NewRequest("GET", "/items", nil)); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+	var inc *logcore.Incoming
+	for _, f := range entry.Context {
+		if f.Key == "incoming" {
+			v := f.Interface.(logcore.Incoming)
+			inc = &v
+			break
+		}
+	}
+	if inc == nil {
+		t.Fatal("missing incoming field")
+	}
+	if inc.Req.Body != nil {
+		t.Errorf("expected nil body for GET with no body, got %v", inc.Req.Body)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// getResHeaders coverage
+// ---------------------------------------------------------------------------
+
+func TestGetResHeaders_CapturesResponseHeaders(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Get("/with-headers", func(c *fiber.Ctx) error {
+		c.Set("X-Trace-ID", "trace-abc")
+		c.Set("X-Custom", "val1")
+		return c.SendStatus(200)
+	})
+
+	if _, err := app.Test(httptest.NewRequest("GET", "/with-headers", nil)); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+	var inc *logcore.Incoming
+	for _, f := range entry.Context {
+		if f.Key == "incoming" {
+			v := f.Interface.(logcore.Incoming)
+			inc = &v
+			break
+		}
+	}
+	if inc == nil {
+		t.Fatal("missing incoming field")
+	}
+	if inc.Res.Headers == nil {
+		t.Error("expected response headers to be captured")
+	}
+	headers, ok := inc.Res.Headers.(map[string]string)
+	if !ok {
+		t.Fatalf("expected map[string]string res headers, got %T", inc.Res.Headers)
+	}
+	if headers["X-Trace-Id"] == "" && headers["X-Trace-ID"] == "" {
+		t.Errorf("expected X-Trace-ID in response headers, got %+v", headers)
+	}
+}
+
+func TestGetResHeaders_MultiValueHeader(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Get("/multi-header", func(c *fiber.Ctx) error {
+		c.Response().Header.Add("X-Values", "a")
+		c.Response().Header.Add("X-Values", "b")
+		return c.SendStatus(200)
+	})
+
+	if _, err := app.Test(httptest.NewRequest("GET", "/multi-header", nil)); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+	var inc *logcore.Incoming
+	for _, f := range entry.Context {
+		if f.Key == "incoming" {
+			v := f.Interface.(logcore.Incoming)
+			inc = &v
+			break
+		}
+	}
+	if inc == nil {
+		t.Fatal("missing incoming field")
+	}
+	// Multi-value response headers should be joined with ","
+	if inc.Res.Headers == nil {
+		t.Error("expected response headers to be captured")
+	}
+}
+
+func TestGetReqBody_EmptyJSONObject(t *testing.T) {
+	// An empty JSON object `{}` parses to an empty map → getReqBody returns nil.
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+	app.Post("/empty-body", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest("POST", "/empty-body", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected 1 log, got %d", logs.Len())
+	}
+	entry := logs.AllUntimed()[0]
+	var inc *logcore.Incoming
+	for _, f := range entry.Context {
+		if f.Key == "incoming" {
+			v := f.Interface.(logcore.Incoming)
+			inc = &v
+			break
+		}
+	}
+	if inc == nil {
+		t.Fatal("missing incoming field")
+	}
+	// Empty JSON object maps to empty map → returns nil
+	if inc.Req.Body != nil {
+		t.Errorf("expected nil body for empty JSON object, got %v", inc.Req.Body)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// getResStatusCode coverage — non-2xx
+// ---------------------------------------------------------------------------
+
+func TestGetResStatusCode_NonSuccess(t *testing.T) {
+	cases := []struct {
+		path   string
+		status int
+		want   string
+	}{
+		{"/notfound", 404, "404"},
+		{"/servererr", 500, "500"},
+		{"/created", 201, "201"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.want, func(t *testing.T) {
+			l, logs := newObservedLogger(t)
+			app := fiber.New()
+			app.Use(logfiber.Middleware(logfiber.Config{Logger: l, SkipPaths: []string{}}))
+			status := tc.status
+			app.Get(tc.path, func(c *fiber.Ctx) error { return c.SendStatus(status) })
+
+			if _, err := app.Test(httptest.NewRequest("GET", tc.path, nil)); err != nil {
+				t.Fatalf("Test: %v", err)
+			}
+			if logs.Len() != 1 {
+				t.Fatalf("expected 1 log, got %d", logs.Len())
+			}
+			entry := logs.AllUntimed()[0]
+			var inc *logcore.Incoming
+			for _, f := range entry.Context {
+				if f.Key == "incoming" {
+					v := f.Interface.(logcore.Incoming)
+					inc = &v
+					break
+				}
+			}
+			if inc == nil {
+				t.Fatal("missing incoming field")
+			}
+			if inc.Res.StatusCode != tc.want {
+				t.Errorf("expected status %q, got %q", tc.want, inc.Res.StatusCode)
+			}
+		})
 	}
 }

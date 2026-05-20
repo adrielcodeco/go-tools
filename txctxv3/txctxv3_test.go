@@ -153,6 +153,58 @@ func TestV3CtxVariants(t *testing.T) {
 	}
 }
 
+type testKey struct{}
+
+func TestV3ContextExtractor_PropagatesValue(t *testing.T) {
+	db := setupTestDB(t)
+
+	extractor := func(c fiber.Ctx) context.Context {
+		return context.WithValue(context.Background(), testKey{}, "v3-sentinel")
+	}
+
+	var capturedVal any
+
+	app := fiber.New()
+	app.Post("/test", txctxv3.Middleware(db, txctxv3.Config{LazyTx: txctxv3.BoolPtr(true)}, extractor), func(c fiber.Ctx) error {
+		capturedVal = c.Context().Value(testKey{})
+		return nil
+	})
+
+	req := httptest.NewRequest("POST", "/test", nil)
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("unexpected status %d", resp.StatusCode)
+	}
+	if capturedVal != "v3-sentinel" {
+		t.Errorf("expected context value %q, got %v", "v3-sentinel", capturedVal)
+	}
+}
+
+func TestV3ContextExtractor_NilUsesDefault(t *testing.T) {
+	db := setupTestDB(t)
+
+	// No extractor — default c.Context() path; a normal write must still commit.
+	app := fiber.New()
+	app.Post("/test", txctxv3.Middleware(db, txctxv3.Config{LazyTx: txctxv3.BoolPtr(true)}), func(c fiber.Ctx) error {
+		return txctxv3.DB(c).Create(&Item{Name: "v3-extractor-nil"}).Error
+	})
+
+	req := httptest.NewRequest("POST", "/test", nil)
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("unexpected status %d", resp.StatusCode)
+	}
+	if !itemExists(t, db, "v3-extractor-nil") {
+		t.Error("record should persist when no extractor is provided")
+	}
+}
+
 func TestV3UpstreamContextPropagated(t *testing.T) {
 	db := setupTestDB(t)
 

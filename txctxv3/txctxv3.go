@@ -17,15 +17,33 @@ type Config = txcore.Config
 // BoolPtr is a helper for setting Config.LazyTx inline.
 func BoolPtr(v bool) *bool { return txcore.BoolPtr(v) }
 
+// ContextExtractor is called once per request to obtain the base context for
+// the transaction holder. When provided to Middleware it is used instead of
+// c.Context(). Use this when apmfiberv3.Middleware is in the chain so that
+// the APM transaction stored on the fasthttp RequestCtx is visible inside
+// GORM callbacks:
+//
+//	txctxv3.Middleware(db, cfg, func(c fiber.Ctx) context.Context { return c.RequestCtx() })
+type ContextExtractor func(c fiber.Ctx) context.Context
+
 // Middleware returns a Fiber v3 middleware that manages a request-scoped
 // GORM transaction with timeout-triggered rollback and commit/rollback
-// callbacks.
-func Middleware(db *gorm.DB, cfg Config) fiber.Handler {
+// callbacks. An optional ContextExtractor may be supplied to override the
+// base context (default: c.Context()).
+func Middleware(db *gorm.DB, cfg Config, extractor ...ContextExtractor) fiber.Handler {
 	cfg = cfg.WithDefaults()
 	lazy := *cfg.LazyTx
+	var extract ContextExtractor
+	if len(extractor) > 0 {
+		extract = extractor[0]
+	}
 
 	return func(c fiber.Ctx) error {
-		reqCtx, cancel := context.WithTimeout(c.Context(), cfg.Timeout)
+		baseCtx := c.Context()
+		if extract != nil {
+			baseCtx = extract(c)
+		}
+		reqCtx, cancel := context.WithTimeout(baseCtx, cfg.Timeout)
 		defer cancel()
 
 		holder := txcore.NewHolder(db, cfg.CompensationCtx, lazy, cfg.OnCallbackError)

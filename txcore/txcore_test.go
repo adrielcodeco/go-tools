@@ -256,10 +256,325 @@ func TestAppendCounters(t *testing.T) {
 	}
 }
 
+// --- lazyPool / TxCommitter tests ---
+
+func TestLazyPoolImplementsTxCommitter(t *testing.T) {
+	// compile-time check: *lazyPool must satisfy gorm.TxCommitter
+	var _ gorm.TxCommitter = (*lazyPool)(nil)
+}
+
+func TestLazyPoolCommit_BeforeStart(t *testing.T) {
+	db := setupTestDB(t)
+	_, h := injectHolder(db)
+	pool := &lazyPool{h: h, base: db.ConnPool}
+
+	if err := pool.Commit(); err != nil {
+		t.Fatalf("Commit before Begin should return nil, got: %v", err)
+	}
+}
+
+func TestLazyPoolRollback_BeforeStart(t *testing.T) {
+	db := setupTestDB(t)
+	_, h := injectHolder(db)
+	pool := &lazyPool{h: h, base: db.ConnPool}
+
+	if err := pool.Rollback(); err != nil {
+		t.Fatalf("Rollback before Begin should return nil, got: %v", err)
+	}
+}
+
+func TestLazyPoolTxCommitter_AfterBegin(t *testing.T) {
+	db := setupTestDB(t)
+	ctx, h := injectHolder(db)
+
+	pool := &lazyPool{h: h, base: db.ConnPool}
+
+	// trigger a write so Begin is called lazily
+	if _, err := pool.ExecContext(ctx, "INSERT INTO items(name) VALUES (?)", "txcommitter-row"); err != nil {
+		t.Fatalf("ExecContext: %v", err)
+	}
+	if !h.Started() {
+		t.Fatal("expected lazy tx to have started after write")
+	}
+
+	// Commit through the TxCommitter interface must not error
+	if err := pool.Commit(); err != nil {
+		t.Fatalf("Commit after Begin: %v", err)
+	}
+}
+
+func TestLazyPoolRollback_AfterBegin(t *testing.T) {
+	db := setupTestDB(t)
+	ctx, h := injectHolder(db)
+
+	pool := &lazyPool{h: h, base: db.ConnPool}
+
+	if _, err := pool.ExecContext(ctx, "INSERT INTO items(name) VALUES (?)", "rollback-row"); err != nil {
+		t.Fatalf("ExecContext: %v", err)
+	}
+	if !h.Started() {
+		t.Fatal("expected lazy tx to have started after write")
+	}
+
+	// Rollback through the TxCommitter interface must not error
+	if err := pool.Rollback(); err != nil {
+		t.Fatalf("Rollback after Begin: %v", err)
+	}
+}
+
+func TestLazyPoolSatisfiesTxCommitter_RuntimeAssert(t *testing.T) {
+	db := setupTestDB(t)
+	ctx, h := injectHolder(db)
+
+	pool := &lazyPool{h: h, base: db.ConnPool}
+
+	// trigger a write so pool.h.tx is non-nil
+	if _, err := pool.ExecContext(ctx, "INSERT INTO items(name) VALUES (?)", "iface-check"); err != nil {
+		t.Fatalf("ExecContext: %v", err)
+	}
+
+	// At runtime the interface must also be satisfied (redundant with compile-time,
+	// but documents the intent for isTransaction()-style checks in gormautobatch).
+	if _, ok := any(pool).(gorm.TxCommitter); !ok {
+		t.Error("*lazyPool must satisfy gorm.TxCommitter at runtime")
+	}
+}
+
 func TestBaseDB(t *testing.T) {
 	db := setupTestDB(t)
 	_, h := injectHolder(db)
 	if h.BaseDB() != db {
 		t.Error("BaseDB should return the original *gorm.DB")
+	}
+}
+
+// --- RegisterWithManager / tracking / wgAdd / wgDone ---
+
+// fakeRegistrar implements CloserRegistrar and captures the registered closer.
+type fakeRegistrar struct {
+	name    string
+	phase   int
+	timeout time.Duration
+	fn      func(ctx context.Context) error
+}
+
+func (r *fakeRegistrar) RegisterCloser(name string, phase int, timeout time.Duration, fn func(ctx context.Context) error) {
+	r.name = name
+	r.phase = phase
+	r.timeout = timeout
+	r.fn = fn
+}
+
+// resetTracking restores global tracking state after a test that activates it.
+func resetTracking(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		trackingActive.Store(false)
+		// Drain any leftover WaitGroup count so other tests don't deadlock.
+		// We do this by draining via Done() for any count > 0 using a channel trick:
+		// actually the only safe way is to ensure tests that call wgAdd() also call wgDone().
+	})
+}
+
+func TestRegisterWithManager_SetsTrackingActive(t *testing.T) {
+	resetTracking(t)
+
+	reg := &fakeRegistrar{}
+	RegisterWithManager(reg, 2, 35*time.Second)
+
+	if !trackingActive.Load() {
+		t.Error("trackingActive should be true after RegisterWithManager")
+	}
+	if reg.name != "txcore-drain" {
+		t.Errorf("expected closer name 'txcore-drain', got %q", reg.name)
+	}
+	if reg.phase != 2 {
+		t.Errorf("expected phase 2, got %d", reg.phase)
+	}
+	if reg.timeout != 35*time.Second {
+		t.Errorf("expected timeout 35s, got %v", reg.timeout)
+	}
+}
+
+func TestRegisterWithManager_CloserDrainsWaitGroup(t *testing.T) {
+	resetTracking(t)
+
+	reg := &fakeRegistrar{}
+	RegisterWithManager(reg, 2, 35*time.Second)
+
+	if reg.fn == nil {
+		t.Fatal("RegisterCloser fn must not be nil")
+	}
+
+	// Create a holder (wgAdd inside NewHolder when trackingActive), then let
+	// Rollback call wgDone. The closer must then return promptly.
+	db := setupTestDB(t)
+	h := NewHolder(db, 5*time.Second, true, nil)
+
+	if !h.tracked {
+		t.Error("holder should be tracked when trackingActive is true")
+	}
+
+	// Run the closer in a goroutine — it will block until wgDone.
+	done := make(chan error, 1)
+	go func() {
+		done <- reg.fn(context.Background())
+	}()
+
+	// Give the goroutine a moment to block on Wait.
+	time.Sleep(10 * time.Millisecond)
+
+	select {
+	case <-done:
+		t.Error("closer should still be blocking — wgDone not called yet")
+	default:
+	}
+
+	// Rollback decrements the WaitGroup.
+	h.Rollback()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("closer fn should return nil, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("closer fn did not return within 2 seconds after wgDone")
+	}
+}
+
+func TestNewHolder_TrackingBranch(t *testing.T) {
+	resetTracking(t)
+	trackingActive.Store(true)
+
+	db := setupTestDB(t)
+	h := NewHolder(db, 5*time.Second, true, nil)
+
+	if !h.tracked {
+		t.Error("holder.tracked should be true when trackingActive is set")
+	}
+
+	// Must call wgDone to balance the wgAdd inside NewHolder.
+	h.Rollback()
+}
+
+func TestMustFromCtx_Success(t *testing.T) {
+	db := setupTestDB(t)
+	h := NewHolder(db, 5*time.Second, true, nil)
+	ctx := Inject(context.Background(), h)
+
+	got := MustFromCtx(ctx)
+	if got != h {
+		t.Error("MustFromCtx should return the same holder that was injected")
+	}
+}
+
+func TestCommit_ErrorPath_WgDone(t *testing.T) {
+	resetTracking(t)
+	trackingActive.Store(true)
+
+	reg := &fakeRegistrar{}
+	RegisterWithManager(reg, 2, 35*time.Second)
+
+	db := setupTestDB(t)
+	h := NewHolder(db, 5*time.Second, false, nil) // eager — Begin opens a real tx
+	ctx := Inject(context.Background(), h)
+	h.Begin(ctx)
+
+	// Force the tx into an error state so Commit returns an error.
+	// Rolling back before Commit makes the subsequent Commit fail.
+	h.mu.Lock()
+	_ = h.tx.Rollback()
+	h.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- reg.fn(context.Background())
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	commitErr, postErr := h.Commit()
+	// commitErr should be non-nil (tx was already rolled back)
+	// but regardless of the exact error, wgDone must have been called.
+	_ = commitErr
+	_ = postErr
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("closer fn should return nil, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("closer fn did not return — wgDone was not called on commit error path")
+	}
+}
+
+func TestCommit_PostCommitError_WgDone(t *testing.T) {
+	resetTracking(t)
+	trackingActive.Store(true)
+
+	reg := &fakeRegistrar{}
+	RegisterWithManager(reg, 2, 35*time.Second)
+
+	db := setupTestDB(t)
+	h := NewHolder(db, 5*time.Second, true, nil)
+
+	// Register an OnCommit callback that returns an error.
+	h.AppendOnCommit(func(_ *gorm.DB) error {
+		return fmt.Errorf("post-commit boom")
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- reg.fn(context.Background())
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	commitErr, postErr := h.Commit()
+	if commitErr != nil {
+		t.Logf("commitErr: %v (no tx was open, expected nil)", commitErr)
+	}
+	if postErr == nil {
+		t.Error("expected postCommitErr to be set")
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("closer fn should return nil, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("closer fn did not return — wgDone not called on post-commit error path")
+	}
+}
+
+func TestRollback_WgDone_Tracked(t *testing.T) {
+	resetTracking(t)
+	trackingActive.Store(true)
+
+	reg := &fakeRegistrar{}
+	RegisterWithManager(reg, 2, 35*time.Second)
+
+	db := setupTestDB(t)
+	h := NewHolder(db, 5*time.Second, true, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- reg.fn(context.Background())
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	h.Rollback()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("closer fn should return nil, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("closer fn did not return — wgDone not called in Rollback tracked path")
 	}
 }

@@ -140,6 +140,24 @@ func TestInstrumentRedisDoesNotPanic(t *testing.T) {
 	}
 }
 
+// fakeUniversalClient wraps *redis.Client to create an unsupported concrete
+// type. redisotel.InstrumentTracing performs a type switch; because the type
+// is *fakeUniversalClient (not *redis.Client / *ClusterClient / *Ring), it
+// falls through to the default case and returns an error, exercising the
+// early-return branch in InstrumentRedis.
+type fakeUniversalClient struct{ *redis.Client }
+
+func TestInstrumentRedisErrorPath(t *testing.T) {
+	inner := redis.NewClient(&redis.Options{Addr: "127.0.0.1:0"})
+	defer inner.Close()
+
+	fake := &fakeUniversalClient{inner}
+	err := apmcore.InstrumentRedis(fake)
+	if err == nil {
+		t.Fatal("expected an error for unsupported client type, got nil")
+	}
+}
+
 func TestLabelsAndCaptureErrorWithActiveTx(t *testing.T) {
 	_, _, errs := apmtest.WithTransaction(func(ctx context.Context) {
 		apmcore.SetLabel(ctx, "wallet_id", "w-1")

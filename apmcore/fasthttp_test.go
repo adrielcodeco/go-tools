@@ -94,6 +94,37 @@ func TestTraceFastHTTPCallNilGuards(t *testing.T) {
 	}
 }
 
+// TestTraceFastHTTPCallWithQueryString exercises two branches in
+// buildStdlibHTTPRequest that were previously uncovered:
+//   - the `if rq != ""` block (RawQuery assignment) at fasthttp.go:94
+//   - the VisitAll callback body at fasthttp.go:99 (requires at least one header)
+func TestTraceFastHTTPCallWithQueryString(t *testing.T) {
+	_, spans, _ := apmtest.WithTransaction(func(ctx context.Context) {
+		req := fasthttp.AcquireRequest()
+		resp := fasthttp.AcquireResponse()
+		defer fasthttp.ReleaseRequest(req)
+		defer fasthttp.ReleaseResponse(resp)
+
+		// URL with a query string → exercises the rq != "" branch.
+		req.SetRequestURI("https://api.example.com/search?q=foo&page=1")
+		req.Header.SetMethod("GET")
+		// Set a custom header so VisitAll's callback is invoked at least once.
+		req.Header.Set("X-Request-ID", "test-123")
+
+		err := apmcore.TraceFastHTTPCall(ctx, req, resp, func() error {
+			resp.SetStatusCode(200)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(spans))
+	}
+}
+
 func TestInjectFastHTTPTraceContext(t *testing.T) {
 	apmtest.WithTransaction(func(ctx context.Context) {
 		req := fasthttp.AcquireRequest()
@@ -104,7 +135,7 @@ func TestInjectFastHTTPTraceContext(t *testing.T) {
 		}
 	})
 	// No-ops should not panic.
-	apmcore.InjectFastHTTPTraceContext(nil, nil)
+	apmcore.InjectFastHTTPTraceContext(nil, nil) //nolint:staticcheck // intentional nil-safety test
 	apmcore.InjectFastHTTPTraceContext(context.Background(), nil)
 	r := fasthttp.AcquireRequest()
 	apmcore.InjectFastHTTPTraceContext(context.Background(), r) // no tx → silent

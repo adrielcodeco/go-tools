@@ -24,8 +24,13 @@ func lazyDB(ctx context.Context, h *Holder) *gorm.DB {
 	return session
 }
 
-// lazyPool implements gorm.ConnPool. Reads (SELECT) route to the base pool,
-// writes upgrade to a real *sql.Tx via Holder.Begin.
+// lazyPool implements gorm.ConnPool and gorm.TxCommitter. Reads (SELECT)
+// route to the base pool, writes upgrade to a real *sql.Tx via Holder.Begin.
+//
+// Implementing TxCommitter is required so that gormautobatch's isTransaction()
+// check correctly detects an active lazy transaction and skips batching —
+// preventing batched writes from committing outside the holder's transaction
+// and breaking atomicity on rollback.
 //
 // Detection is statement-based: anything that isn't a SELECT is treated as a
 // write. False positives only mean a transaction opens slightly earlier than
@@ -34,6 +39,34 @@ func lazyDB(ctx context.Context, h *Holder) *gorm.DB {
 type lazyPool struct {
 	h    *Holder
 	base gorm.ConnPool
+}
+
+// Commit forwards to the underlying tx when started, satisfying gorm.TxCommitter.
+func (p *lazyPool) Commit() error {
+	p.h.mu.Lock()
+	tx := p.h.tx
+	p.h.mu.Unlock()
+	if tx == nil {
+		return nil
+	}
+	if c, ok := tx.Statement.ConnPool.(gorm.TxCommitter); ok {
+		return c.Commit()
+	}
+	return nil
+}
+
+// Rollback forwards to the underlying tx when started, satisfying gorm.TxCommitter.
+func (p *lazyPool) Rollback() error {
+	p.h.mu.Lock()
+	tx := p.h.tx
+	p.h.mu.Unlock()
+	if tx == nil {
+		return nil
+	}
+	if c, ok := tx.Statement.ConnPool.(gorm.TxCommitter); ok {
+		return c.Rollback()
+	}
+	return nil
 }
 
 func isWrite(query string) bool {
