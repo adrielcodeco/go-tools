@@ -174,7 +174,8 @@ type Manager struct {
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 
-	ready atomic.Bool
+	ready   atomic.Bool
+	started atomic.Bool
 
 	once     sync.Once
 	doneCh   chan struct{}
@@ -312,6 +313,21 @@ func (m *Manager) IsReady() bool {
 // "not ready" before the process is even started.
 func (m *Manager) SetReady(v bool) {
 	m.ready.Store(v)
+}
+
+// IsStarted reports whether MarkStarted has been called. Kubernetes startup
+// probes should reflect this value: while false the pod is still
+// initializing and liveness/readiness probes are suspended by Kubernetes.
+func (m *Manager) IsStarted() bool {
+	return m.started.Load()
+}
+
+// MarkStarted signals that the application has finished initializing
+// (migrations ran, caches warmed up, etc.) and is ready to serve traffic.
+// Call this once at the end of your boot sequence, before blocking on
+// ListenAndWait.
+func (m *Manager) MarkStarted() {
+	m.started.Store(true)
 }
 
 // Trigger initiates the shutdown sequence programmatically (e.g. from a

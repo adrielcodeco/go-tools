@@ -16,6 +16,7 @@ package setup
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	fiberv2 "github.com/gofiber/fiber/v2"
@@ -64,6 +65,9 @@ type Builder struct {
 	rueidisClients []rueidisEntry
 	fiberV2App     *fiberv2.App
 	fiberV3App     *fiberv3.App
+	healthProbesV2 *HealthProbesConfig
+	healthProbesV3 *HealthProbesConfig
+	startupFn      func() error
 }
 
 // Result is returned by Build and carries handles to the resources that were
@@ -160,24 +164,99 @@ func (b *Builder) WithFiberV3(app *fiberv3.App) *Builder {
 	return b
 }
 
+// HealthProbesConfig holds the HTTP paths for the three Kubernetes probe
+// endpoints. Zero values fall back to the defaults below.
+type HealthProbesConfig struct {
+	// LivenessPath is the path for the liveness probe (default: /healthz/live).
+	LivenessPath string
+	// ReadinessPath is the path for the readiness probe (default: /healthz/ready).
+	ReadinessPath string
+	// StartupPath is the path for the startup probe (default: /healthz/startup).
+	StartupPath string
+}
+
+func (c HealthProbesConfig) withDefaults() HealthProbesConfig {
+	if c.LivenessPath == "" {
+		c.LivenessPath = "/healthz/live"
+	}
+	if c.ReadinessPath == "" {
+		c.ReadinessPath = "/healthz/ready"
+	}
+	if c.StartupPath == "" {
+		c.StartupPath = "/healthz/startup"
+	}
+	return c
+}
+
+// WithStartupFn registers a boot function that runs at the end of Build,
+// after all components are wired. If fn returns nil, mgr.MarkStarted() is
+// called automatically, flipping the startup probe to 200. If fn returns
+// an error, Build returns that error and MarkStarted is never called.
+//
+// This is the recommended way to run migrations and warm-up logic, as it
+// makes the relationship between boot completion and startup probe explicit:
+//
+//	setup.New().
+//	    WithFiberV2(app).
+//	    WithHealthProbesV2(setup.HealthProbesConfig{}).
+//	    WithGORM(db).
+//	    WithStartupFn(func() error {
+//	        if err := runMigrations(db); err != nil {
+//	            return err
+//	        }
+//	        return warmUpCache(ctx)
+//	    }).
+//	    Build(mgr)
+//	// mgr.MarkStarted() was called automatically — startup probe is now 200.
+func (b *Builder) WithStartupFn(fn func() error) *Builder {
+	b.startupFn = fn
+	return b
+}
+
+// WithHealthProbesV2 registers the three Kubernetes probe handlers
+// (liveness, readiness, startup) on the Fiber v2 app. Must be called after
+// WithFiberV2. cfg may be zero-valued to use the default paths:
+//
+//	GET /healthz/live    → always 200 (liveness)
+//	GET /healthz/ready   → 200 while ready, 503 during shutdown (readiness)
+//	GET /healthz/startup → 503 until mgr.MarkStarted(), then 200 (startup)
+func (b *Builder) WithHealthProbesV2(cfg HealthProbesConfig) *Builder {
+	b.healthProbesV2 = &cfg
+	return b
+}
+
+// WithHealthProbesV3 registers the three Kubernetes probe handlers
+// (liveness, readiness, startup) on the Fiber v3 app. Must be called after
+// WithFiberV3. cfg may be zero-valued to use the default paths:
+//
+//	GET /healthz/live    → always 200 (liveness)
+//	GET /healthz/ready   → 200 while ready, 503 during shutdown (readiness)
+//	GET /healthz/startup → 503 until mgr.MarkStarted(), then 200 (startup)
+func (b *Builder) WithHealthProbesV3(cfg HealthProbesConfig) *Builder {
+	b.healthProbesV3 = &cfg
+	return b
+}
+
 // Build wires all configured components onto mgr in the required order:
 //
-//  0. gsfiber.RegisterApp / gsfiberv3.RegisterApp  (if WithFiberV2 / WithFiberV3)
-//  1. apmcore.SetupOTelSDK                         (if WithOTel)
-//  2. logcore.New + logcore.SetGlobal              (if WithLogger)
-//  3. apmcore.NewGormPlugin via db.Use             (if WithGORM + WithOTel)
-//  4. mgr.RegisterDB                               (if WithGORM)
-//  5. txcore.RegisterWithManager                   (if WithGORM)
-//  6. apmcore.RegisterDBPoolMetricsWithManager     (if WithGORM + WithOTel)
-//  7. autobatch.RegisterWithManager                (if WithAutobatch or WithAutobatchConfig)
-//  8. go-redis closers + optional OTel hooks       (if WithRedis)
-//  9. rueidis closers + optional OTel wrapping     (if WithRueidis)
-//  10. apmcore.RegisterWithManager                 (if WithOTel)
-//  11. logcore.RegisterGlobalWithManager           (if WithLogger)
-//  12. logcore.InstallHTTPClientHook               (if WithHTTPClientLogging)
+//  0. gsfiber.RegisterApp / gsfiberv3.RegisterApp          (if WithFiberV2 / WithFiberV3)
+//  0a. liveness + readiness + startup probe routes         (if WithHealthProbesV2 / WithHealthProbesV3)
+//  1. apmcore.SetupOTelSDK                                 (if WithOTel)
+//  2. logcore.New + logcore.SetGlobal                      (if WithLogger)
+//  3. apmcore.NewGormPlugin via db.Use                     (if WithGORM + WithOTel)
+//  4. mgr.RegisterDB                                       (if WithGORM)
+//  5. txcore.RegisterWithManager                           (if WithGORM)
+//  6. apmcore.RegisterDBPoolMetricsWithManager             (if WithGORM + WithOTel)
+//  7. autobatch.RegisterWithManager                        (if WithAutobatch or WithAutobatchConfig)
+//  8. go-redis closers + optional OTel hooks               (if WithRedis)
+//  9. rueidis closers + optional OTel wrapping             (if WithRueidis)
+//  10. apmcore.RegisterWithManager                         (if WithOTel)
+//  11. logcore.InstallHTTPClientHook                       (if WithHTTPClientLogging)
+//  12. startupFn() + mgr.MarkStarted()                     (if WithStartupFn)
 //
-// Build returns an error only if apmcore.SetupOTelSDK, logcore.New, or
-// db.Use(apmcore.NewGormPlugin()) fails.
+// Build returns an error if apmcore.SetupOTelSDK, logcore.New,
+// db.Use(apmcore.NewGormPlugin()), or the startup function fails, or if
+// WithHealthProbesV2/V3 is set without a corresponding WithFiberV2/V3.
 func (b *Builder) Build(mgr *gscore.Manager) (*Result, error) {
 	return b.build(mgr)
 }
@@ -197,6 +276,31 @@ func (b *Builder) build(mgr registrar) (*Result, error) {
 	if b.fiberV3App != nil {
 		if m, ok := mgr.(*gscore.Manager); ok {
 			gsfiberv3.RegisterApp(m, b.fiberV3App)
+		}
+	}
+
+	// 0a. Health probe routes — registered immediately after the app so they
+	// are available from the first request, before any other middleware runs.
+	if b.healthProbesV2 != nil {
+		if b.fiberV2App == nil {
+			return nil, fmt.Errorf("setup: WithHealthProbesV2 requires WithFiberV2 to be called first")
+		}
+		if m, ok := mgr.(*gscore.Manager); ok {
+			cfg := b.healthProbesV2.withDefaults()
+			b.fiberV2App.Get(cfg.LivenessPath, gsfiber.LivenessHandler())
+			b.fiberV2App.Get(cfg.ReadinessPath, gsfiber.ReadinessHandler(m))
+			b.fiberV2App.Get(cfg.StartupPath, gsfiber.StartupHandler(m))
+		}
+	}
+	if b.healthProbesV3 != nil {
+		if b.fiberV3App == nil {
+			return nil, fmt.Errorf("setup: WithHealthProbesV3 requires WithFiberV3 to be called first")
+		}
+		if m, ok := mgr.(*gscore.Manager); ok {
+			cfg := b.healthProbesV3.withDefaults()
+			b.fiberV3App.Get(cfg.LivenessPath, gsfiberv3.LivenessHandler())
+			b.fiberV3App.Get(cfg.ReadinessPath, gsfiberv3.ReadinessHandler(m))
+			b.fiberV3App.Get(cfg.StartupPath, gsfiberv3.StartupHandler(m))
 		}
 	}
 
@@ -313,6 +417,18 @@ func (b *Builder) build(mgr registrar) (*Result, error) {
 	// 11. HTTP client logging hook — installed after global logger is set.
 	if b.httpClientLog {
 		logcore.InstallHTTPClientHook()
+	}
+
+	// 12. Startup function — run boot logic and mark the pod as started.
+	// Runs last so all components (logger, APM, DB, Redis) are ready before
+	// the startup function executes. MarkStarted is only called on success.
+	if b.startupFn != nil {
+		if err := b.startupFn(); err != nil {
+			return nil, fmt.Errorf("setup: startup function failed: %w", err)
+		}
+		if m, ok := mgr.(*gscore.Manager); ok {
+			m.MarkStarted()
+		}
 	}
 
 	return res, nil

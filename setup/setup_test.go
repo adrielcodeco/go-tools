@@ -2,9 +2,14 @@ package setup
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	fiberv2 "github.com/gofiber/fiber/v2"
+	fiberv3 "github.com/gofiber/fiber/v3"
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/rueidis"
 	"gorm.io/driver/sqlite"
@@ -363,5 +368,166 @@ func TestBuilder_WithAutobatchConfig_InjectsSpanEmitter(t *testing.T) {
 	// under "gorm:autobatch").
 	if db.Config.Plugins["gorm:autobatch"] == nil {
 		t.Error("expected gorm:autobatch plugin to be registered on the gorm.DB")
+	}
+}
+
+// TestBuilder_WithHealthProbesV2_RequiresFiberV2 verifies that Build returns an
+// error when WithHealthProbesV2 is called without a prior WithFiberV2.
+func TestBuilder_WithHealthProbesV2_RequiresFiberV2(t *testing.T) {
+	mgr := gscore.New(gscore.Config{})
+	_, err := New().WithHealthProbesV2(HealthProbesConfig{}).Build(mgr)
+	if err == nil {
+		t.Fatal("expected error when WithHealthProbesV2 called without WithFiberV2, got nil")
+	}
+}
+
+// TestBuilder_WithHealthProbesV3_RequiresFiberV3 verifies that Build returns an
+// error when WithHealthProbesV3 is called without a prior WithFiberV3.
+func TestBuilder_WithHealthProbesV3_RequiresFiberV3(t *testing.T) {
+	mgr := gscore.New(gscore.Config{})
+	_, err := New().WithHealthProbesV3(HealthProbesConfig{}).Build(mgr)
+	if err == nil {
+		t.Fatal("expected error when WithHealthProbesV3 called without WithFiberV3, got nil")
+	}
+}
+
+// TestBuilder_WithHealthProbesV2_RegistersRoutes verifies that the three probe
+// routes are registered on the Fiber v2 app and return the expected status codes.
+func TestBuilder_WithHealthProbesV2_RegistersRoutes(t *testing.T) {
+	mgr := gscore.New(gscore.Config{})
+	app := fiberv2.New()
+	_, err := New().WithFiberV2(app).WithHealthProbesV2(HealthProbesConfig{}).Build(mgr)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/healthz/live", 200},
+		{"/healthz/ready", 200},   // not yet triggered
+		{"/healthz/startup", 503}, // not yet marked started
+	} {
+		resp, err := app.Test(newGET(tc.path))
+		if err != nil {
+			t.Fatalf("GET %s: %v", tc.path, err)
+		}
+		if resp.StatusCode != tc.want {
+			t.Errorf("GET %s: got %d want %d", tc.path, resp.StatusCode, tc.want)
+		}
+	}
+
+	// After MarkStarted, startup probe flips to 200.
+	mgr.MarkStarted()
+	resp, err := app.Test(newGET("/healthz/startup"))
+	if err != nil {
+		t.Fatalf("GET /healthz/startup after MarkStarted: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("after MarkStarted: got %d want 200", resp.StatusCode)
+	}
+}
+
+// TestBuilder_WithHealthProbesV3_RegistersRoutes verifies that the three probe
+// routes are registered on the Fiber v3 app and return the expected status codes.
+func TestBuilder_WithHealthProbesV3_RegistersRoutes(t *testing.T) {
+	mgr := gscore.New(gscore.Config{})
+	app := fiberv3.New()
+	_, err := New().WithFiberV3(app).WithHealthProbesV3(HealthProbesConfig{}).Build(mgr)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/healthz/live", 200},
+		{"/healthz/ready", 200},   // not yet triggered
+		{"/healthz/startup", 503}, // not yet marked started
+	} {
+		resp, err := app.Test(newGET(tc.path))
+		if err != nil {
+			t.Fatalf("GET %s: %v", tc.path, err)
+		}
+		if resp.StatusCode != tc.want {
+			t.Errorf("GET %s: got %d want %d", tc.path, resp.StatusCode, tc.want)
+		}
+	}
+
+	mgr.MarkStarted()
+	resp, err := app.Test(newGET("/healthz/startup"))
+	if err != nil {
+		t.Fatalf("GET /healthz/startup after MarkStarted: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("after MarkStarted: got %d want 200", resp.StatusCode)
+	}
+}
+
+// TestBuilder_WithHealthProbesV2_CustomPaths verifies that custom paths are
+// respected when HealthProbesConfig is non-zero.
+func TestBuilder_WithHealthProbesV2_CustomPaths(t *testing.T) {
+	mgr := gscore.New(gscore.Config{})
+	app := fiberv2.New()
+	_, err := New().WithFiberV2(app).WithHealthProbesV2(HealthProbesConfig{
+		LivenessPath:  "/live",
+		ReadinessPath: "/ready",
+		StartupPath:   "/startup",
+	}).Build(mgr)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	mgr.MarkStarted()
+
+	for _, path := range []string{"/live", "/ready", "/startup"} {
+		resp, err := app.Test(newGET(path))
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		if resp.StatusCode != 200 {
+			t.Errorf("GET %s: got %d want 200", path, resp.StatusCode)
+		}
+	}
+}
+
+func newGET(path string) *http.Request {
+	return httptest.NewRequest("GET", path, nil)
+}
+
+// TestBuilder_WithStartupFn_CallsMarkStarted verifies that a successful
+// startup function causes mgr.IsStarted() to be true after Build.
+func TestBuilder_WithStartupFn_CallsMarkStarted(t *testing.T) {
+	mgr := gscore.New(gscore.Config{})
+	called := false
+	_, err := New().WithStartupFn(func() error {
+		called = true
+		return nil
+	}).Build(mgr)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !called {
+		t.Error("startup function was not called")
+	}
+	if !mgr.IsStarted() {
+		t.Error("expected mgr.IsStarted() == true after successful startup function")
+	}
+}
+
+// TestBuilder_WithStartupFn_ErrorPreventsMarkStarted verifies that when the
+// startup function returns an error, Build returns that error and
+// mgr.IsStarted() remains false.
+func TestBuilder_WithStartupFn_ErrorPreventsMarkStarted(t *testing.T) {
+	mgr := gscore.New(gscore.Config{})
+	_, err := New().WithStartupFn(func() error {
+		return fmt.Errorf("migrations failed")
+	}).Build(mgr)
+	if err == nil {
+		t.Fatal("expected Build to return error when startup function fails")
+	}
+	if mgr.IsStarted() {
+		t.Error("expected mgr.IsStarted() == false when startup function fails")
 	}
 }

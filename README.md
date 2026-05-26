@@ -3,7 +3,7 @@
 A toolbox for production [Fiber](https://github.com/gofiber/fiber) + [GORM](https://gorm.io) services. It ships three complementary primitives that share the same design philosophy (framework-agnostic core + thin Fiber adapters for v2 and v3):
 
 1. **`txctx` / `txctxv3`** — request-scoped database transactions with lazy `BEGIN`, automatic rollback on error/timeout/panic, and commit/rollback callbacks.
-2. **`gsfiber` / `gsfiberv3`** — Kubernetes-aware graceful shutdown for Fiber + GORM + outbound calls, with ordered phases, hooks, readiness probe, and force-kill ceiling.
+2. **`gsfiber` / `gsfiberv3`** — Kubernetes-aware graceful shutdown for Fiber + GORM + outbound calls, with ordered phases, hooks, liveness/readiness/startup probes, and force-kill ceiling.
 3. **`apmfiber` / `apmfiberv3`** — Elastic APM tracing for Fiber + GORM + outgoing HTTP + Redis: foldable DB spans, log↔trace correlation, transaction labels, error capture, and DB-pool metrics.
 4. **`gsrueidis`** — Rueidis adapter for the graceful-shutdown manager, with timeout-bounded close so a wedged Redis client cannot stall shutdown.
 5. **`gsredis`** — go-redis/v9 adapter for the graceful-shutdown manager, analogous to gsrueidis.
@@ -50,6 +50,9 @@ Each trio shares a framework-agnostic engine (`txcore`, `gscore`, `apmcore`) so 
   - [Phases](#phases)
   - [Usage](#usage-1)
   - [Kubernetes integration](#kubernetes-integration)
+    - [Health probe handlers](#health-probe-handlers)
+    - [Recommended Kubernetes manifest](#recommended-kubernetes-manifest)
+    - [Shutdown sequence on kubectl delete pod](#shutdown-sequence-on-kubectl-delete-pod)
 - [Rueidis graceful shutdown (`gsrueidis`)](#rueidis-gsrueidis)
 - [Redis graceful shutdown (`gsredis`)](#redis-graceful-shutdown-gsredis)
 - [GORM Auto-batch (`gormautobatch`)](#gorm-auto-batch-gormautobatch)
@@ -87,7 +90,7 @@ func main() {
         PreStopDelay:   5 * time.Second,
         DrainTimeout:   25 * time.Second,
         DBCloseTimeout: 5 * time.Second,
-        ForceKillAfter: 55 * time.Second,
+        ForceKillAfter: 55 * time.Second, // must be < terminationGracePeriodSeconds
     })
 
     result, err := setup.New().
@@ -95,18 +98,31 @@ func main() {
         WithOTel(ctx).
         WithGORM(db).
         WithFiberV2(app).
+        WithHealthProbesV2(setup.HealthProbesConfig{}). // registers /healthz/{live,ready,startup}
         WithHTTPClientLogging().
+        WithStartupFn(func() error {                    // runs migrations; calls MarkStarted on success
+            return runMigrations(db)
+        }).
         Build(mgr)
     if err != nil {
-        log.Fatal(err)
+        log.Fatal(err) // includes startup function errors
     }
     defer result.Shutdown(ctx)
 
     registerRoutes(app)
-    app.Get("/healthz/ready", gsfiber.ReadinessHandler(mgr))
 
-    go app.Listen(":8080")
-    mgr.ListenAndWait()
+    // Background workers must derive their context from mgr.RootContext() so
+    // they are cancelled the instant SIGTERM is received, before the drain starts.
+    go pollWorker(mgr.RootContext())
+
+    // ListenAndTrigger starts the server in a goroutine and calls mgr.Trigger()
+    // if Listen fails (e.g. port already in use), so the process never hangs
+    // waiting for a signal that will never arrive.
+    gsfiber.ListenAndTrigger(app, mgr, ":8080")
+
+    if err := mgr.ListenAndWait(); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -137,9 +153,29 @@ setup.New().
     WithRedis(client, "redis-cache").          // go-redis closer + OTel instrumentation
     WithRueidis(client, "redis-pubsub").       // rueidis closer + OTel wrapping
     WithFiberV2(app).                          // register Fiber v2 app for drain
+    WithHealthProbesV2(setup.HealthProbesConfig{}). // register /healthz/{live,ready,startup}
     WithFiberV3(app).                          // register Fiber v3 app for drain
+    WithHealthProbesV3(setup.HealthProbesConfig{}). // register /healthz/{live,ready,startup}
     WithHTTPClientLogging().                   // install logcore hook on httpclient
+    WithStartupFn(func() error {               // run boot logic; calls MarkStarted on success
+        return runMigrations(db)
+    }).
     Build(mgr)                                 // wire everything; returns *Result, error
+```
+
+`WithHealthProbesV2` / `WithHealthProbesV3` must be called after the
+corresponding `WithFiberV2` / `WithFiberV3`. Calling `WithHealthProbesV2`
+without a prior `WithFiberV2` causes `Build` to return an error.
+`HealthProbesConfig` may be zero-valued to use the defaults
+(`/healthz/live`, `/healthz/ready`, `/healthz/startup`), or you can
+override individual paths:
+
+```go
+WithHealthProbesV2(setup.HealthProbesConfig{
+    LivenessPath:  "/live",
+    ReadinessPath: "/ready",
+    StartupPath:   "/startup",
+})
 ```
 
 `Result.Logger` is the `*logcore.Logger` created by `WithLogger` (nil if not
@@ -734,6 +770,10 @@ type Config struct {
 
 #### 1. Minimum setup
 
+> For production services, prefer the `setup` package (see [Quick Setup](#quick-setup-setup))
+> which handles registration order automatically. This example shows the
+> manual wiring for when you need full control.
+
 ```go
 func main() {
     db := openGORM()
@@ -750,14 +790,25 @@ func main() {
     gsfiber.RegisterApp(mgr, app)
     mgr.RegisterDB(db)
 
-    // Readiness probe flips to 503 the instant SIGTERM arrives.
-    app.Get("/healthz/ready", gsfiber.ReadinessHandler(mgr))
+    // Register all three Kubernetes probe endpoints.
+    app.Get("/healthz/live",    gsfiber.LivenessHandler())        // always 200
+    app.Get("/healthz/ready",   gsfiber.ReadinessHandler(mgr))   // 503 on shutdown
+    app.Get("/healthz/startup", gsfiber.StartupHandler(mgr))     // 503 until MarkStarted
 
-    go func() {
-        if err := app.Listen(":8080"); err != nil {
-            mgr.Trigger() // server failed → start shutdown
-        }
-    }()
+    // Boot sequence: complete migrations before accepting traffic.
+    // The startup probe returns 503 until MarkStarted() is called.
+    if err := runMigrations(db); err != nil {
+        log.Fatal(err)
+    }
+    mgr.MarkStarted()
+
+    // Background workers must use mgr.RootContext() so they are cancelled
+    // the instant SIGTERM is received, before the HTTP drain begins.
+    go pollWorker(mgr.RootContext())
+
+    // ListenAndTrigger starts the server and calls mgr.Trigger() if Listen
+    // fails, so the process never hangs waiting for a signal that won't come.
+    gsfiber.ListenAndTrigger(app, mgr, ":8080")
 
     if err := mgr.ListenAndWait(); err != nil {
         log.Fatal(err)
@@ -860,28 +911,122 @@ how many times it is called or whether a signal also arrives.
 
 ### Kubernetes integration
 
-A typical deployment lines up cleanly with the Manager's phases:
+#### Health probe handlers
+
+The package ships three handlers, one per Kubernetes probe type:
+
+| Handler | Probe | Endpoint | Behaviour |
+|---|---|---|---|
+| `LivenessHandler()` | `livenessProbe` | `/healthz/live` | Always `200`. If the process responds, it is alive. **No external dependencies.** |
+| `ReadinessHandler(mgr)` | `readinessProbe` | `/healthz/ready` | `200` while ready, `503` the instant shutdown begins. Drives kube-proxy endpoint removal. |
+| `StartupHandler(mgr)` | `startupProbe` | `/healthz/startup` | `503` until `mgr.MarkStarted()` is called, then `200`. Protects slow-boot pods (migrations, cache warm-up). |
+
+**Via `setup.Builder` (recommended):** `WithHealthProbesV2` / `WithHealthProbesV3`
+registers all three routes automatically during `Build`:
+
+```go
+mgr := gscore.New(gscore.Config{...})
+_, err := setup.New().
+    WithFiberV2(app).
+    WithHealthProbesV2(setup.HealthProbesConfig{}).  // zero value = default paths
+    WithGORM(db).
+    Build(mgr)
+
+// Boot sequence: WithStartupFn runs migrations and calls MarkStarted
+// automatically on success — startup probe flips to 200 after Build returns.
+// Build itself returns an error if migrations fail, so the process exits
+// cleanly before ever calling Listen.
+gsfiber.ListenAndTrigger(app, mgr, ":8080")
+mgr.ListenAndWait()
+```
+
+**Manual registration** (without `setup`):
+
+```go
+app.Get("/healthz/live",    gsfiber.LivenessHandler())
+app.Get("/healthz/ready",   gsfiber.ReadinessHandler(mgr))
+app.Get("/healthz/startup", gsfiber.StartupHandler(mgr))
+
+if err := runMigrations(db); err != nil {
+    log.Fatal(err)
+}
+mgr.MarkStarted() // ← startup probe flips to 200
+
+gsfiber.ListenAndTrigger(app, mgr, ":8080")
+mgr.ListenAndWait()
+```
+
+> **Rule of thumb:** never check databases, caches, or any external
+> dependency inside `LivenessHandler`. A slow dependency would cause
+> liveness to fail → Kubernetes restarts the pod → cascading restarts
+> across the fleet.
+
+---
+
+#### Recommended Kubernetes manifest
 
 ```yaml
 spec:
-  terminationGracePeriodSeconds: 60   # > ForceKillAfter (55s in example above)
+  terminationGracePeriodSeconds: 60   # must be > ForceKillAfter
   containers:
   - name: api
+    # --- startup probe -------------------------------------------
+    # Kubernetes suspends liveness + readiness until this passes once.
+    # Gives slow-boot pods (migrations, warm-up) time to initialize
+    # without being killed by a failing liveness probe.
+    startupProbe:
+      httpGet:
+        path: /healthz/startup
+        port: 8080
+      # Allow up to 5 min for boot: periodSeconds(10) × failureThreshold(30)
+      periodSeconds: 10
+      failureThreshold: 30
+      timeoutSeconds: 2
+
+    # --- liveness probe ------------------------------------------
+    # Restarts the pod if the process stops responding entirely.
+    # Keep it cheap: no DB, no cache, no external calls.
+    livenessProbe:
+      httpGet:
+        path: /healthz/live
+        port: 8080
+      initialDelaySeconds: 0   # startupProbe already guards the boot window
+      periodSeconds: 10
+      failureThreshold: 3
+      timeoutSeconds: 2
+
+    # --- readiness probe -----------------------------------------
+    # Removes the pod from service endpoints during shutdown.
+    # Tight period + low threshold so kube-proxy reacts quickly.
     readinessProbe:
       httpGet:
-        path: /healthz/ready          # gsfiber.ReadinessHandler
+        path: /healthz/ready
         port: 8080
       periodSeconds: 2
       failureThreshold: 1
+      timeoutSeconds: 1
+
     lifecycle:
       preStop:
         exec:
-          # Optional: belt-and-suspenders if PreStopDelay isn't enough.
-          # The Manager already handles SIGTERM directly.
+          # Belt-and-suspenders sleep in case SIGTERM races with
+          # kube-proxy propagation. The Manager's PreStopDelay
+          # provides the same guarantee in-process.
           command: ["sleep", "5"]
 ```
 
-The sequence on `kubectl delete pod`:
+**Timing relationships that must hold:**
+
+```
+startupProbe:  periodSeconds × failureThreshold  ≥  expected max boot time
+livenessProbe: does NOT query DB / cache / external services
+ForceKillAfter  <  terminationGracePeriodSeconds  (e.g. 55s < 60s)
+PreStopDelay    ≥  readinessProbe.periodSeconds   (e.g. 5s ≥ 2s)
+```
+
+---
+
+#### Shutdown sequence on `kubectl delete pod`
 
 1. Kubernetes sends `SIGTERM` and starts the `preStop` hook (in parallel).
 2. The Manager observes the signal → flips readiness to `503` → starts

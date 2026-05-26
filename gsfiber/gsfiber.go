@@ -59,3 +59,46 @@ func ReadinessHandler(m *Manager) fiber.Handler {
 		return c.SendStatus(fiber.StatusServiceUnavailable)
 	}
 }
+
+// LivenessHandler returns a Fiber v2 handler suitable for a Kubernetes
+// liveness probe. It always returns 200 — if the process can respond to
+// HTTP, it is alive. Keep this handler free of external dependencies
+// (DB, cache, etc.) to avoid spurious pod restarts.
+func LivenessHandler() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		return c.SendStatus(fiber.StatusOK)
+	}
+}
+
+// StartupHandler returns a Fiber v2 handler suitable for a Kubernetes
+// startup probe. It returns 503 until MarkStarted is called on the
+// Manager, and 200 afterwards. While the startup probe fails, Kubernetes
+// suspends liveness and readiness probes, protecting pods with slow boot
+// sequences (migrations, cache warm-up, etc.).
+func StartupHandler(m *Manager) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if m.IsStarted() {
+			return c.SendStatus(fiber.StatusOK)
+		}
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+}
+
+// ListenAndTrigger starts the Fiber v2 app on addr in a goroutine. If
+// app.Listen returns a non-nil error (e.g. port already in use), it calls
+// mgr.Trigger() so the shutdown sequence starts instead of leaving the
+// process hanging waiting for a signal that will never arrive.
+//
+// Typical use at the end of main, after all routes are registered:
+//
+//	gsfiber.ListenAndTrigger(app, mgr, ":8080")
+//	if err := mgr.ListenAndWait(); err != nil {
+//	    log.Fatal(err)
+//	}
+func ListenAndTrigger(app *fiber.App, m *Manager, addr string) {
+	go func() {
+		if err := app.Listen(addr); err != nil {
+			m.Trigger()
+		}
+	}()
+}
