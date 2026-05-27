@@ -6,6 +6,7 @@ require (
 	github.com/adrielcodeco/go-tools v0.0.0
 	github.com/adrielcodeco/go-tools/apmcore v0.0.0
 	github.com/adrielcodeco/go-tools/gormautobatch v0.0.0
+	github.com/adrielcodeco/go-tools/gormcache v0.0.0
 	github.com/adrielcodeco/go-tools/gsfiberv3 v0.0.0
 	github.com/adrielcodeco/go-tools/logcore v0.0.0
 	github.com/gofiber/fiber/v2 v2.52.13
@@ -79,6 +80,7 @@ replace (
 	github.com/adrielcodeco/go-tools => ../
 	github.com/adrielcodeco/go-tools/apmcore => ../apmcore
 	github.com/adrielcodeco/go-tools/gormautobatch => ../gormautobatch
+	github.com/adrielcodeco/go-tools/gormcache => ../gormcache
 	github.com/adrielcodeco/go-tools/gsfiberv3 => ../gsfiberv3
 	github.com/adrielcodeco/go-tools/gsredis => ../gsredis
 	github.com/adrielcodeco/go-tools/gsrueidis => ../gsrueidis

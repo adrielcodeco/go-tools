@@ -27,6 +27,7 @@ import (
 
 	"github.com/adrielcodeco/go-tools/apmcore"
 	autobatch "github.com/adrielcodeco/go-tools/gormautobatch"
+	caches "github.com/adrielcodeco/go-tools/gormcache"
 	"github.com/adrielcodeco/go-tools/gscore"
 	"github.com/adrielcodeco/go-tools/gsfiber"
 	"github.com/adrielcodeco/go-tools/gsfiberv3"
@@ -55,19 +56,21 @@ type rueidisEntry struct {
 // everything in Build. The zero value is valid; calling Build with no options
 // registers nothing and returns an empty Result.
 type Builder struct {
-	loggerOpts     *logcore.Options
-	otelCtx        *context.Context
-	gormDB         *gorm.DB
-	autobatchP     *autobatch.Plugin
-	autobatchCfg   *autobatch.Config
-	httpClientLog  bool
-	redisClients   []redisEntry
-	rueidisClients []rueidisEntry
-	fiberV2App     *fiberv2.App
-	fiberV3App     *fiberv3.App
-	healthProbesV2 *HealthProbesConfig
-	healthProbesV3 *HealthProbesConfig
-	startupFn      func() error
+	loggerOpts      *logcore.Options
+	otelCtx         *context.Context
+	gormDB          *gorm.DB
+	autobatchP      *autobatch.Plugin
+	autobatchCfg    *autobatch.Config
+	gormcachePlugin *caches.Caches
+	gormcacheCfg    *caches.Config
+	httpClientLog   bool
+	redisClients    []redisEntry
+	rueidisClients  []rueidisEntry
+	fiberV2App      *fiberv2.App
+	fiberV3App      *fiberv3.App
+	healthProbesV2  *HealthProbesConfig
+	healthProbesV3  *HealthProbesConfig
+	startupFn       func() error
 }
 
 // Result is returned by Build and carries handles to the resources that were
@@ -119,6 +122,23 @@ func (b *Builder) WithAutobatch(p *autobatch.Plugin) *Builder {
 // creating the plugin so batched writes appear in APM traces.
 func (b *Builder) WithAutobatchConfig(cfg autobatch.Config) *Builder {
 	b.autobatchCfg = &cfg
+	return b
+}
+
+// WithGORMCache configures the builder to register a pre-built gormcache plugin
+// via db.Use during Build. Use WithGORMCacheConfig instead when you want Build
+// to construct the plugin and wire OTel instrumentation automatically.
+func (b *Builder) WithGORMCache(p *caches.Caches) *Builder {
+	b.gormcachePlugin = p
+	return b
+}
+
+// WithGORMCacheConfig configures the builder to create a gormcache plugin from
+// cfg and register it with GORM during Build. When WithOTel is also set, Build
+// automatically wraps cfg.Cacher with apmcore.InstrumentCacher so cache
+// operations appear as OTel spans.
+func (b *Builder) WithGORMCacheConfig(cfg caches.Config) *Builder {
+	b.gormcacheCfg = &cfg
 	return b
 }
 
@@ -248,6 +268,7 @@ func (b *Builder) WithHealthProbesV3(cfg HealthProbesConfig) *Builder {
 //  5. txcore.RegisterWithManager                           (if WithGORM)
 //  6. apmcore.RegisterDBPoolMetricsWithManager             (if WithGORM + WithOTel)
 //  7. autobatch.RegisterWithManager                        (if WithAutobatch or WithAutobatchConfig)
+//  7b. gormcache plugin via db.Use                         (if WithGORMCache or WithGORMCacheConfig)
 //  8. go-redis closers + optional OTel hooks               (if WithRedis)
 //  9. rueidis closers + optional OTel wrapping             (if WithRueidis)
 //  10. apmcore.RegisterWithManager                         (if WithOTel)
@@ -364,6 +385,23 @@ func (b *Builder) build(mgr registrar) (*Result, error) {
 		}
 	} else if b.autobatchP != nil {
 		autobatch.RegisterWithManager(b.autobatchP, mgr, int(gscore.PhasePostDrain), 30*time.Second)
+	}
+
+	// 7b. gormcache — install after autobatch so autobatch's Before callbacks fire
+	// before gormcache's mutator invalidation callbacks.
+	if b.gormcacheCfg != nil && b.gormDB != nil {
+		cfg := *b.gormcacheCfg
+		if b.otelCtx != nil && cfg.Cacher != nil {
+			cfg.Cacher = apmcore.InstrumentCacher(cfg.Cacher)
+		}
+		p := &caches.Caches{Conf: &cfg}
+		if err := b.gormDB.Use(p); err != nil {
+			return nil, err
+		}
+	} else if b.gormcachePlugin != nil && b.gormDB != nil {
+		if err := b.gormDB.Use(b.gormcachePlugin); err != nil {
+			return nil, err
+		}
 	}
 
 	// 8a. go-redis clients — optionally instrument with OTel, then register closer.

@@ -10,7 +10,8 @@ A toolbox for production [Fiber](https://github.com/gofiber/fiber) + [GORM](http
 6. **`httpclient`** — Generics-friendly fasthttp client wrapper with built-in APM tracing, pluggable structured-log hook, configurable retry, and sonic JSON.
 7. **`logcore` + `logfiber` / `logfiberv3`** — Structured zap logger pre-wired for APM (auto-error capture, trace.id correlation), with Fiber incoming middleware and an httpclient outgoing hook that share the same `req`/`res`/`responseTime` schema.
 8. **`gormautobatch`** — GORM plugin that transparently batches Create/Update/Delete operations based on measured P95 latency, reducing round-trips under load with per-op SAVEPOINT isolation.
-9. **`setup`** — One-call bootstrap that wires the gscore Manager, Fiber app, GORM, APM, logger, httpclient, gsredis, and gsrueidis together in the correct order. Recommended for production services.
+9. **`gormcache`** — GORM plugin for query result caching and request deduplication (easer). Ships with ready-made Redis and Rueidis backends (`gsredis.NewRedisCacher`, `gsrueidis.NewRueidisCache`) and optional OTel instrumentation via `apmcore.InstrumentCacher`.
+10. **`setup`** — One-call bootstrap that wires the gscore Manager, Fiber app, GORM, APM, logger, httpclient, gsredis, gsrueidis, and gormcache together in the correct order. Recommended for production services.
 
 **Module:** `github.com/adrielcodeco/go-tools`
 
@@ -56,6 +57,16 @@ Each trio shares a framework-agnostic engine (`txcore`, `gscore`, `apmcore`) so 
 - [Rueidis graceful shutdown (`gsrueidis`)](#rueidis-gsrueidis)
 - [Redis graceful shutdown (`gsredis`)](#redis-graceful-shutdown-gsredis)
 - [GORM Auto-batch (`gormautobatch`)](#gorm-auto-batch-gormautobatch)
+- [GORM Cache (`gormcache`)](#gorm-cache-gormcache)
+  - [Features](#features-3)
+  - [Installation](#installation-3)
+  - [Quick start](#quick-start)
+  - [Easer (request deduplication)](#easer-request-deduplication)
+  - [Cacher interface](#cacher-interface)
+  - [Ready-made backends](#ready-made-backends)
+  - [Tag-based invalidation](#tag-based-invalidation)
+  - [OTel instrumentation](#otel-instrumentation)
+  - [setup integration](#setup-integration)
 - [Elastic APM (`apmfiber` / `apmfiberv3`)](#elastic-apm-apmfiber--apmfiberv3)
   - [Packages](#packages)
   - [Features](#features-2)
@@ -136,10 +147,11 @@ func main() {
 6. `txcore.RegisterWithManager` — drain in-flight transactions before DB closes
 7. `apmcore.RegisterDBPoolMetricsWithManager` — deregister pool metric gatherer at shutdown
 8. `autobatch.RegisterWithManager` (if `WithAutobatch`/`WithAutobatchConfig` set)
-9. go-redis closers + optional OTel instrumentation (if `WithRedis`)
-10. rueidis closers + optional OTel wrapping (if `WithRueidis`)
-11. `apmcore.RegisterWithManager` — flush OTel spans/metrics at `PhasePostDB`
-12. `logcore.RegisterGlobalWithManager` — flush zap buffers last
+9. `db.Use(gormcache plugin)` (if `WithGORMCache`/`WithGORMCacheConfig` set; `Cacher` auto-wrapped with OTel if `WithOTel` set)
+10. go-redis closers + optional OTel instrumentation (if `WithRedis`)
+11. rueidis closers + optional OTel wrapping (if `WithRueidis`)
+12. `apmcore.RegisterWithManager` — flush OTel spans/metrics at `PhasePostDB`
+13. `logcore.RegisterGlobalWithManager` — flush zap buffers last
 
 ### Builder API
 
@@ -150,6 +162,8 @@ setup.New().
     WithGORM(db).                              // register GORM plugin, DB close, txcore
     WithAutobatchConfig(autobatch.Config{...}). // create + register autobatch plugin
     WithAutobatch(existingPlugin).             // register a pre-built autobatch plugin
+    WithGORMCacheConfig(caches.Config{...}).   // create + register gormcache plugin (OTel auto-wired)
+    WithGORMCache(existingPlugin).             // register a pre-built gormcache plugin
     WithRedis(client, "redis-cache").          // go-redis closer + OTel instrumentation
     WithRueidis(client, "redis-pubsub").       // rueidis closer + OTel wrapping
     WithFiberV2(app).                          // register Fiber v2 app for drain
@@ -200,15 +214,15 @@ to compose. This section shows how they connect and what order matters.
                         │  (wires everything below in the correct order)  │
                         └───────────────────┬─────────────────────────────┘
                                             │
-          ┌─────────────┬──────────────────┼──────────────────┬───────────────┐
-          ▼             ▼                  ▼                  ▼               ▼
-      gsfiber/      apmfiber/          logfiber/          txctx/          gsredis/
-     gsfiberv3    apmfiberv3          logfiberv3         txctxv3         gsrueidis
-          │             │                  │                  │
-          ▼             ▼                  ▼                  ▼
-       gscore        apmcore           logcore            txcore
-          │             │                  │                  │
-          └─────────────┴──────────────────┴──────────────────┘
+     ┌──────────────┬──────────────────────┼──────────────────┬──────────────────┐
+     ▼              ▼                      ▼                  ▼                  ▼
+ gsfiber/       apmfiber/             logfiber/           txctx/            gsredis/
+gsfiberv3     apmfiberv3             logfiberv3          txctxv3           gsrueidis
+     │              │                      │                  │                  │
+     ▼              ▼                      ▼                  ▼                  ▼
+  gscore         apmcore               logcore            txcore           gormcache
+     │              │                      │                  │
+     └──────────────┴──────────────────────┴──────────────────┘
                                     │
                               go-tools (root)
                          gscore.CloserRegistrar,
@@ -289,6 +303,14 @@ resources to be torn down before dependents have finished:
 `setup.Build` follows this order exactly. If you wire manually, register in the
 order shown above — particularly, do **not** close Redis before transactions
 finish, and do **not** flush the logger before OTel spans are exported.
+
+#### APM + gormcache: cache spans
+
+`apmcore.InstrumentCacher(inner)` wraps any `caches.Cacher` with OTel spans so
+cache hits, misses, stores, and invalidations appear in APM traces alongside DB
+spans. When using `setup.New().WithOTel(ctx).WithGORMCacheConfig(cfg)`, this
+wrapping is automatic — `Build` injects `InstrumentCacher` before registering
+the plugin.
 
 #### gsredis / gsrueidis: which one to use
 
@@ -1390,6 +1412,275 @@ mgr := gscore.New(gscore.Config{
     // ...
 })
 ```
+
+---
+
+## GORM Cache (`gormcache`)
+
+A GORM plugin that reduces database load via two complementary mechanisms:
+**request deduplication** (easer) and **response caching**. The plugin ships a
+`Cacher` interface; ready-made implementations for go-redis and rueidis are
+provided in `gsredis` and `gsrueidis`. All cache operations can be wrapped with
+OTel spans via `apmcore.InstrumentCacher`.
+
+### Features
+
+- **Request deduplication (easer)** — if N identical queries run concurrently,
+  only the first hits the database; the rest wait and receive the same result.
+- **Response caching** — implement the `Cacher` interface to plug any backend
+  (Redis, in-memory, etc.). Cache hits skip the database entirely.
+- **Granular invalidation** — every Create/Update/Delete mutation fires
+  `Cacher.Invalidate` with an `InvalidationEvent` carrying the affected tables,
+  primary key values, and mutation type.
+- **Tag-based invalidation** — tag cached queries via `Config.TagsFunc` and
+  selectively evict them with `caches.WithInvalidateTags` on mutations.
+- **Safe under concurrent load** — invalidation only fires after a mutation
+  completes without error; failed or short-circuited operations (e.g. autobatch)
+  do not evict the cache.
+- **Compatible with any gorm-supported database.**
+
+### Installation
+
+```bash
+go get github.com/adrielcodeco/go-tools/gormcache
+```
+
+For the ready-made Redis backend, also install:
+
+```bash
+go get github.com/adrielcodeco/go-tools/gsredis    # go-redis backend
+# or
+go get github.com/adrielcodeco/go-tools/gsrueidis  # rueidis backend
+```
+
+### Quick start
+
+```go
+import (
+    "github.com/adrielcodeco/go-tools/gormcache"
+    "github.com/adrielcodeco/go-tools/gsredis"
+)
+
+redisClient := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+
+cachesPlugin := &caches.Caches{Conf: &caches.Config{
+    Easer:  true,                                          // enable request deduplication
+    Cacher: gsredis.NewRedisCacher(redisClient, 5*time.Minute), // Redis backend
+}}
+
+if err := db.Use(cachesPlugin); err != nil {
+    log.Fatal(err)
+}
+```
+
+All subsequent `db.Find`, `db.First`, etc. calls are intercepted: cache hits
+return immediately; misses run the query and store the result. `db.Create`,
+`db.Save`, `db.Updates`, and `db.Delete` trigger `Cacher.Invalidate`
+automatically.
+
+### Easer (request deduplication)
+
+When `Config.Easer = true`, identical concurrent queries are coalesced: the
+first goroutine to arrive executes the query; all others block until it
+completes and receive a deep copy of the result. This eliminates thundering-herd
+behaviour for hot read paths without any cache backend.
+
+```go
+cachesPlugin := &caches.Caches{Conf: &caches.Config{
+    Easer: true,
+}}
+_ = db.Use(cachesPlugin)
+
+// The two concurrent Find calls below share one DB roundtrip.
+var (
+    q1Users []UserModel
+    q2Users []UserModel
+)
+wg := &sync.WaitGroup{}
+wg.Add(2)
+go func() {
+    db.Model(&UserModel{}).Joins("Role").Find(&q1Users, "Role.Name = ?", "Admin")
+    wg.Done()
+}()
+go func() {
+    time.Sleep(50 * time.Millisecond)
+    db.Model(&UserModel{}).Joins("Role").Find(&q2Users, "Role.Name = ?", "Admin")
+    wg.Done()
+}()
+wg.Wait()
+```
+
+### Cacher interface
+
+Implement three methods to plug any cache backend:
+
+```go
+type Cacher interface {
+    // Get returns the cached result for key, or (nil, nil) on a miss.
+    Get(ctx context.Context, key string, q *Query[any]) (*Query[any], error)
+
+    // Store persists the query result under key.
+    // Use caches.TagsFromContext(ctx) to read tags set by TagsFunc.
+    Store(ctx context.Context, key string, val *Query[any]) error
+
+    // Invalidate evicts cache entries based on the mutation event.
+    // event.Tags is populated from WithInvalidateTags; event.Tables and
+    // event.EntityIDs are always populated from the GORM statement.
+    Invalidate(ctx context.Context, event *InvalidationEvent) error
+}
+```
+
+`Query[T]` provides `Marshal() ([]byte, error)` and `Unmarshal([]byte) error`
+for serialisation. Use them in `Store` and `Get`:
+
+```go
+func (c *myCacher) Store(ctx context.Context, key string, val *caches.Query[any]) error {
+    b, err := val.Marshal()  // JSON
+    if err != nil {
+        return err
+    }
+    return c.backend.Set(ctx, key, b, c.ttl)
+}
+
+func (c *myCacher) Get(ctx context.Context, key string, q *caches.Query[any]) (*caches.Query[any], error) {
+    b, err := c.backend.Get(ctx, key)
+    if err != nil {
+        return nil, nil  // treat missing key as a miss
+    }
+    if err := q.Unmarshal(b); err != nil {
+        return nil, err
+    }
+    return q, nil
+}
+```
+
+### Ready-made backends
+
+Both backends index cache keys by tag (via Redis `SADD tag:<tag> <key>`) so
+`Invalidate` can evict exactly the right keys without a full-cache scan.
+
+#### go-redis (`gsredis.NewRedisCacher`)
+
+```go
+import "github.com/adrielcodeco/go-tools/gsredis"
+
+cacher := gsredis.NewRedisCacher(redisClient, 5*time.Minute)
+// ttl=0 → keys persist until explicitly invalidated
+```
+
+#### rueidis (`gsrueidis.NewRueidisCache`)
+
+```go
+import "github.com/adrielcodeco/go-tools/gsrueidis"
+
+cacher := gsrueidis.NewRueidisCache(rueidisClient, 5*time.Minute)
+```
+
+Rueidis pipelines all `Store` commands (`SET` + `SADD` + `EXPIRE`) in a single
+`DoMulti` call, and `Invalidate` deletes all member keys in a single
+multi-key `DEL`, making it the higher-throughput option for write-heavy
+invalidation workloads.
+
+> **Tag index note:** both backends build the tag→key index only from tags
+> provided via `Config.TagsFunc`. If `TagsFunc` is not set, `Invalidate` is
+> a no-op (entries expire via TTL). To invalidate by table, emit the table
+> name as a tag:
+>
+> ```go
+> TagsFunc: func(db *gorm.DB) []string {
+>     return []string{db.Statement.Table}
+> },
+> ```
+
+### Tag-based invalidation
+
+Tags let you selectively evict cache entries, similar to TanStack Query's query
+keys. Instead of wiping the full cache on every mutation, you tag queries and
+only evict the relevant ones.
+
+**Tag queries** via `Config.TagsFunc`:
+
+```go
+cachesPlugin := &caches.Caches{Conf: &caches.Config{
+    Cacher: cacher,
+    TagsFunc: func(db *gorm.DB) []string {
+        return []string{db.Statement.Table}
+    },
+}}
+```
+
+**Invalidate by tag** via `caches.WithInvalidateTags` on the mutation context:
+
+```go
+ctx := caches.WithInvalidateTags(context.Background(), "users")
+db.WithContext(ctx).Create(&User{Name: "John"})
+// → fires Cacher.Invalidate with event.Tags = ["users"]
+```
+
+**`InvalidationEvent` fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `Tables` | `[]string` | Tables involved in the mutation |
+| `EntityIDs` | `[]interface{}` | Primary key values of affected entities |
+| `MutationType` | `MutationType` | `MutationCreate`, `MutationUpdate`, or `MutationDelete` |
+| `Tags` | `[]string` | Tags from `WithInvalidateTags` (empty if not set) |
+
+**Minimal invalidation example** (in-memory backend):
+
+```go
+func (c *memoryCacher) Invalidate(ctx context.Context, event *caches.InvalidationEvent) error {
+    if len(event.Tags) > 0 {
+        return c.invalidateByTags(event.Tags)
+    }
+    // No tags: fall back to wiping everything.
+    c.store = &sync.Map{}
+    return nil
+}
+```
+
+### OTel instrumentation
+
+Wrap any `Cacher` with `apmcore.InstrumentCacher` to emit OTel spans for every
+`Get`, `Store`, and `Invalidate` call. Spans are named `gormcache.get`,
+`gormcache.store`, and `gormcache.invalidate`, and include `cache.hit` (bool),
+`cache.tags` (count), and `db.tables` attributes. Errors are recorded and the
+span status is set to `Error` so APM error-rate metrics fire correctly.
+
+```go
+import "github.com/adrielcodeco/go-tools/apmcore"
+
+cachesPlugin := &caches.Caches{Conf: &caches.Config{
+    Cacher: apmcore.InstrumentCacher(
+        gsredis.NewRedisCacher(redisClient, 5*time.Minute),
+    ),
+}}
+```
+
+### setup integration
+
+`setup.Builder` wires gormcache in the correct position (after `gormautobatch`,
+so autobatch's batch callbacks fire before cache invalidation callbacks). When
+`WithOTel` is also set, `Build` automatically wraps the `Cacher` with
+`apmcore.InstrumentCacher`.
+
+```go
+result, err := setup.New().
+    WithGORM(db).
+    WithOTel(ctx).
+    WithRedis(redisClient, "redis-cache").
+    WithGORMCacheConfig(caches.Config{
+        Easer:  true,
+        Cacher: gsredis.NewRedisCacher(redisClient, 5*time.Minute),
+        TagsFunc: func(db *gorm.DB) []string {
+            return []string{db.Statement.Table}
+        },
+    }).
+    Build(mgr)
+```
+
+`WithGORMCache(p *caches.Caches)` is also available when you need to construct
+the plugin yourself before passing it to `Build`.
 
 ---
 

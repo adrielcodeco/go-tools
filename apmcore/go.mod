@@ -2,7 +2,10 @@ module github.com/adrielcodeco/go-tools/apmcore
 
 go 1.25.0
 
-require github.com/adrielcodeco/go-tools v0.0.0
+require (
+	github.com/adrielcodeco/go-tools v0.0.0
+	github.com/adrielcodeco/go-tools/gormcache v0.0.0
+)
 
 require (
 	github.com/mattn/go-sqlite3 v1.14.22
@@ -57,4 +60,7 @@ require (
 	howett.net/plist v1.0.0 // indirect
 )
 
-replace github.com/adrielcodeco/go-tools => ../
+replace (
+	github.com/adrielcodeco/go-tools => ../
+	github.com/adrielcodeco/go-tools/gormcache => ../gormcache
+)

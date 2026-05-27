@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/adrielcodeco/go-tools v0.0.0
 	github.com/adrielcodeco/go-tools/apmcore v0.0.0
+	github.com/adrielcodeco/go-tools/gormcache v0.0.0
 	github.com/redis/go-redis/v9 v9.16.0
 )
 
@@ -53,4 +54,5 @@ require (
 replace (
 	github.com/adrielcodeco/go-tools => ../
 	github.com/adrielcodeco/go-tools/apmcore => ../apmcore
+	github.com/adrielcodeco/go-tools/gormcache => ../gormcache
 )

@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/adrielcodeco/go-tools v0.0.0
+	github.com/adrielcodeco/go-tools/gormcache v0.0.0
 	github.com/redis/rueidis v1.0.75
 )
 
@@ -15,4 +16,7 @@ require (
 	gorm.io/gorm v1.30.0 // indirect
 )
 
-replace github.com/adrielcodeco/go-tools => ../
+replace (
+	github.com/adrielcodeco/go-tools => ../
+	github.com/adrielcodeco/go-tools/gormcache => ../gormcache
+)
