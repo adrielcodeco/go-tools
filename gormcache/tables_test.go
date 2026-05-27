@@ -35,3 +35,18 @@ func TestExtractTables_Dedup(t *testing.T) {
 		t.Errorf("extractTables() = %v, want [users]", tables)
 	}
 }
+
+// TestExtractTables_PublicWrapperMatchesPrivate verifies that the exported
+// ExtractTables delegates correctly to extractTables.
+func TestExtractTables_PublicWrapperMatchesPrivate(t *testing.T) {
+	db, _ := gorm.Open(tests.DummyDialector{}, &gorm.Config{})
+	db.Statement.Table = "orders"
+	pub := ExtractTables(db)
+	priv := extractTables(db)
+	if !reflect.DeepEqual(pub, priv) {
+		t.Errorf("ExtractTables()=%v != extractTables()=%v", pub, priv)
+	}
+	if len(pub) != 1 || pub[0] != "orders" {
+		t.Errorf("ExtractTables() = %v, want [orders]", pub)
+	}
+}

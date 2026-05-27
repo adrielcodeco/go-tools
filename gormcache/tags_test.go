@@ -24,6 +24,38 @@ func TestWithTags_Empty(t *testing.T) {
 	}
 }
 
+func TestWithTags_NoTagsIsNoop(t *testing.T) {
+	ctx := context.Background()
+	ctx = WithTags(ctx, "existing")
+	ctx2 := WithTags(ctx)
+	if ctx2 != ctx {
+		t.Errorf("WithTags with no args should return the same context")
+	}
+}
+
+func TestWithTags_MergesWithExisting(t *testing.T) {
+	ctx := context.Background()
+	ctx = WithTags(ctx, "users")
+	ctx = WithTags(ctx, "roles", "posts")
+	tags := TagsFromContext(ctx)
+	expected := []string{"users", "roles", "posts"}
+	if !reflect.DeepEqual(tags, expected) {
+		t.Errorf("TagsFromContext() = %v, want %v", tags, expected)
+	}
+}
+
+func TestWithTags_MultipleCallsAccumulate(t *testing.T) {
+	ctx := context.Background()
+	ctx = WithTags(ctx, "a")
+	ctx = WithTags(ctx, "b")
+	ctx = WithTags(ctx, "c")
+	tags := TagsFromContext(ctx)
+	expected := []string{"a", "b", "c"}
+	if !reflect.DeepEqual(tags, expected) {
+		t.Errorf("TagsFromContext() = %v, want %v", tags, expected)
+	}
+}
+
 func TestWithInvalidateTags(t *testing.T) {
 	ctx := context.Background()
 	ctx = WithInvalidateTags(ctx, "users", "posts")

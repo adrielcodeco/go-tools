@@ -23,3 +23,14 @@ func TestExtractEntityIDs_InvalidReflectValue(t *testing.T) {
 		t.Errorf("extractEntityIDs() = %v, want nil", ids)
 	}
 }
+
+// TestExtractEntityIDs_PublicWrapperMatchesPrivate verifies that the exported
+// ExtractEntityIDs delegates correctly to extractEntityIDs.
+func TestExtractEntityIDs_PublicWrapperMatchesPrivate(t *testing.T) {
+	db, _ := gorm.Open(tests.DummyDialector{}, &gorm.Config{})
+	pub := ExtractEntityIDs(db)
+	priv := extractEntityIDs(db)
+	if pub != nil || priv != nil {
+		t.Errorf("expected both nil, got public=%v private=%v", pub, priv)
+	}
+}

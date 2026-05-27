@@ -2,6 +2,11 @@ package caches
 
 import "gorm.io/gorm"
 
+// ExtractTables returns the table names referenced in the current GORM statement.
+func ExtractTables(db *gorm.DB) []string {
+	return extractTables(db)
+}
+
 func extractTables(db *gorm.DB) []string {
 	seen := make(map[string]struct{})
 	var tables []string

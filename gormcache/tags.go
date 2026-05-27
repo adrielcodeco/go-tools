@@ -5,10 +5,17 @@ import "context"
 type tagsKeyType struct{}
 type invalidateTagsKeyType struct{}
 
-// WithTags associates cache tags with the context.
-// Used internally by the caching system to tag cache entries.
+// WithTags associates cache tags with the context, merging with any existing tags.
+// Used by both the caching system (TagsFunc) and application code at query sites.
 func WithTags(ctx context.Context, tags ...string) context.Context {
-	return context.WithValue(ctx, tagsKeyType{}, tags)
+	if len(tags) == 0 {
+		return ctx
+	}
+	existing := TagsFromContext(ctx)
+	merged := make([]string, 0, len(existing)+len(tags))
+	merged = append(merged, existing...)
+	merged = append(merged, tags...)
+	return context.WithValue(ctx, tagsKeyType{}, merged)
 }
 
 // WithInvalidateTags sets tags on the context to indicate which cache entries

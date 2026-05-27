@@ -6,6 +6,11 @@ import (
 	"gorm.io/gorm"
 )
 
+// ExtractEntityIDs returns the primary key values from the current GORM statement.
+func ExtractEntityIDs(db *gorm.DB) []interface{} {
+	return extractEntityIDs(db)
+}
+
 func extractEntityIDs(db *gorm.DB) []interface{} {
 	if db.Statement.Schema == nil {
 		return nil
