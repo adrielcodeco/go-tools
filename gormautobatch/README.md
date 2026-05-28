@@ -78,6 +78,7 @@ Callers block transparently until their batch is flushed — from the caller's p
 - **Callbacks registered *after* `gorm:create`/`gorm:update`/`gorm:delete` are skipped for batched ops.**
   The plugin suppresses the core GORM callback after the batch executes the op via a separate session. Model hooks (e.g. `AfterCreate`) do run, but inside the batch session — not on the caller's `*gorm.DB`.
 - **`RowsAffected` is propagated** back to the caller's `*gorm.DB` after the batch executes, but other `Statement` fields are not.
+- **Statement-level clauses are preserved.** Clauses added via `db.Clauses(...)` — most importantly `clause.OnConflict` (upsert) — are snapshotted at submit time and re-applied inside the flush, so batched upserts remain idempotent. (Prior to this, a batched `OnConflict` insert degraded into a plain INSERT and failed with a duplicate-key error under concurrency.)
 - **Graceful shutdown:** call `plugin.Close()` before exiting your process to drain in-flight batches. After Close, intercepted ops return `ErrBatcherClosed`.
 
 ---

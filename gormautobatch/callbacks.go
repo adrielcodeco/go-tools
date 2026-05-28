@@ -259,6 +259,13 @@ func runOpDirect(tx *gorm.DB, opReq *pendingOp, opFn func(base *gorm.DB, op *pen
 	if opReq.table != "" {
 		base = base.Table(opReq.table)
 	}
+	// Re-apply the caller's statement-level clauses (e.g. ON CONFLICT). The
+	// NewDB session above starts with an empty clause set, so without this an
+	// upsert would degrade into a plain INSERT and fail with a duplicate-key
+	// error under concurrency.
+	if len(opReq.clauses) > 0 {
+		base = base.Clauses(opReq.clauses...)
+	}
 
 	res := opFn(base, opReq)
 	opReq.rows = res.RowsAffected

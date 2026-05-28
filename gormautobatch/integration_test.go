@@ -9,6 +9,7 @@ import (
 	autobatch "github.com/adrielcodeco/go-tools/gormautobatch"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -378,6 +379,56 @@ func TestPlugin_BatchMode_TableOverride(t *testing.T) {
 	db.Model(&Product{}).Count(&count)
 	if count != 0 {
 		t.Fatalf("expected 0 rows in main products table, got %d", count)
+	}
+}
+
+// TestPlugin_BatchMode_OnConflictPreserved is a regression test for the bug
+// where batched creates dropped the caller's clause.OnConflict, turning an
+// idempotent upsert into a plain INSERT that fails with a duplicate-key error
+// under concurrency (the "duplicate key value violates unique constraint"
+// stress-test failure). With the clause snapshot in place, ON CONFLICT DO
+// NOTHING is honoured inside the flush and concurrent duplicate inserts are
+// absorbed instead of erroring.
+func TestPlugin_BatchMode_OnConflictPreserved(t *testing.T) {
+	db := openBatchDB(t)
+
+	// Unique index simulating idx_transaction_error_log_idempotency_key.
+	if err := db.Exec("CREATE UNIQUE INDEX idx_conflict_name ON products(name)").Error; err != nil {
+		t.Fatalf("create index: %v", err)
+	}
+
+	registerPlugin(t, db, autobatch.Config{
+		LatencyThreshold: durPtr(0), // always batch
+		FlushTimeout:     20 * time.Millisecond,
+		MaxBatchSize:     50,
+	})
+
+	// Many goroutines all try to insert the SAME name (same idempotency key).
+	// With ON CONFLICT DO NOTHING none of them should error.
+	const n = 20
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = db.Clauses(clause.OnConflict{DoNothing: true}).
+				Create(&Product{Name: "idem-key", Price: float64(idx)}).Error
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: ON CONFLICT should have absorbed the duplicate, got: %v", i, err)
+		}
+	}
+
+	// Exactly one row should exist despite n concurrent inserts.
+	var count int64
+	db.Model(&Product{}).Where("name = ?", "idem-key").Count(&count)
+	if count != 1 {
+		t.Fatalf("expected exactly 1 row with ON CONFLICT DO NOTHING, got %d", count)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ErrBatcherClosed is returned when an op is submitted to a closed batcher.
@@ -18,14 +19,15 @@ var ErrBatcherClosed = errors.New("autobatch: batcher closed")
 // goroutine never reads from the caller's *gorm.DB.Statement (which the caller
 // or other plugins could mutate concurrently).
 type pendingOp struct {
-	dest   any      // snapshot of Statement.Dest
-	model  any      // snapshot of Statement.Model (nil if not set)
-	table  string   // snapshot of Statement.Table (empty if not set)
-	caller *gorm.DB // caller's DB — receive RowsAffected/Error after flush
-	ctx    context.Context
-	done   chan struct{} // closed after the batch containing this op has executed
-	err    error         // written before done is closed; caller reads after
-	rows   int64         // RowsAffected from flush; copied into caller after wait
+	dest    any              // snapshot of Statement.Dest
+	model   any              // snapshot of Statement.Model (nil if not set)
+	table   string           // snapshot of Statement.Table (empty if not set)
+	clauses []clause.Expression // snapshot of Statement.Clauses (e.g. ON CONFLICT)
+	caller  *gorm.DB         // caller's DB — receive RowsAffected/Error after flush
+	ctx     context.Context
+	done    chan struct{} // closed after the batch containing this op has executed
+	err     error         // written before done is closed; caller reads after
+	rows    int64         // RowsAffected from flush; copied into caller after wait
 }
 
 // batcher collects pending operations and flushes them in batches.
@@ -164,11 +166,34 @@ func wait(ctx context.Context, op *pendingOp) error {
 // so concurrent mutations on the caller side cannot race.
 func newPendingOp(db *gorm.DB) *pendingOp {
 	return &pendingOp{
-		dest:   db.Statement.Dest,
-		model:  db.Statement.Model,
-		table:  db.Statement.Table,
-		caller: db,
-		ctx:    db.Statement.Context,
-		done:   make(chan struct{}),
+		dest:    db.Statement.Dest,
+		model:   db.Statement.Model,
+		table:   db.Statement.Table,
+		clauses: snapshotClauses(db.Statement),
+		caller:  db,
+		ctx:     db.Statement.Context,
+		done:    make(chan struct{}),
 	}
+}
+
+// snapshotClauses copies the caller's statement-level clauses (e.g. the
+// ON CONFLICT set by db.Clauses(clause.OnConflict{...}), or RETURNING/locking
+// clauses) so the flush goroutine can re-apply them. Without this, a batched
+// upsert silently degrades into a plain INSERT and races on a unique index
+// fail with a duplicate-key error instead of being absorbed by ON CONFLICT.
+//
+// GORM stores user-supplied clauses keyed by their Name() in Statement.Clauses.
+// We re-apply them via db.Clauses(...) on the flush session, which re-keys them
+// the same way, so order does not matter.
+func snapshotClauses(stmt *gorm.Statement) []clause.Expression {
+	if len(stmt.Clauses) == 0 {
+		return nil
+	}
+	out := make([]clause.Expression, 0, len(stmt.Clauses))
+	for _, c := range stmt.Clauses {
+		if c.Expression != nil {
+			out = append(out, c.Expression)
+		}
+	}
+	return out
 }
