@@ -73,6 +73,7 @@ Each trio shares a framework-agnostic engine (`txcore`, `gscore`, `apmcore`) so 
   - [Installation](#installation-2)
   - [Quick start (Fiber v2)](#quick-start-fiber-v2)
   - [Manager integration](#manager-integration)
+  - [Startup and probe metrics](#startup-and-probe-metrics)
   - [APM transaction context in txctx](#apm-transaction-context-in-txctx)
   - [Local stack](#local-stack)
   - [Pitfall index](#pitfall-index)
@@ -93,6 +94,8 @@ go get github.com/adrielcodeco/go-tools/setup
 
 ```go
 func main() {
+    processStart := time.Now() // capture as early as possible — covers full boot duration
+
     ctx := context.Background()
     db := openGORM()
     app := fiber.New()
@@ -111,6 +114,7 @@ func main() {
         WithFiberV2(app).
         WithHealthProbesV2(setup.HealthProbesConfig{}). // registers /healthz/{live,ready,startup}
         WithHTTPClientLogging().
+        WithProcessStart(processStart).                 // enables app.startup.duration_ms metric
         WithStartupFn(func() error {                    // runs migrations; calls MarkStarted on success
             return runMigrations(db)
         }).
@@ -151,7 +155,8 @@ func main() {
 10. go-redis closers + optional OTel instrumentation (if `WithRedis`)
 11. rueidis closers + optional OTel wrapping (if `WithRueidis`)
 12. `apmcore.RegisterWithManager` — flush OTel spans/metrics at `PhasePostDB`
-13. `logcore.RegisterGlobalWithManager` — flush zap buffers last
+13. `apmcore.RegisterStartupMetricsWithManager` — register startup/probe metric gatherer (if `WithOTel` + `WithProcessStart`)
+14. `logcore.RegisterGlobalWithManager` — flush zap buffers last
 
 ### Builder API
 
@@ -171,6 +176,7 @@ setup.New().
     WithFiberV3(app).                          // register Fiber v3 app for drain
     WithHealthProbesV3(setup.HealthProbesConfig{}). // register /healthz/{live,ready,startup}
     WithHTTPClientLogging().                   // install logcore hook on httpclient
+    WithProcessStart(processStart).            // origin timestamp for app.startup.duration_ms
     WithStartupFn(func() error {               // run boot logic; calls MarkStarted on success
         return runMigrations(db)
     }).
@@ -1722,6 +1728,10 @@ forced to pull the Elastic + OTel dependency tree.
   because the base driver is passed in.
 - **DB-pool metrics** — `apmcore.RegisterDBPoolMetrics(sqlDB)` emits
   `db.pool.*` on the agent's metrics tick (chartable in Metrics Explorer).
+- **Startup / probe metrics** — `apmcore.RegisterStartupMetricsWithManager`
+  emits `app.startup.duration_ms` and the three `app.probe.*` gauges so you
+  can see exactly when the pod started and tune Kubernetes probe parameters
+  from real data.
 - **HTTP / Redis / zap helpers** — `WrapHTTPTransport`, `InstrumentRedis`,
   `WrapZapCore`, `LogCtxFields` cover the surrounding instrumentation
   surface without forcing a particular client style.
@@ -1779,6 +1789,70 @@ apmcore.RegisterDBPoolMetricsWithManager(sqlDB, mgr, int(gscore.PhasePostDB), 0)
 
 Both helpers accept `phase=0` to default to `PhasePostDB` and `timeout=0` to
 use the built-in defaults (15s for the OTel shutdown; 5s for pool metrics).
+
+#### Startup and probe metrics
+
+`apmcore.RegisterStartupMetricsWithManager` registers a metrics gatherer that
+emits four values on every APM metrics tick (default 30 s, configurable via
+`ELASTIC_APM_METRICS_INTERVAL`):
+
+| Metric | Type | Description |
+|---|---|---|
+| `app.startup.duration_ms` | gauge | Milliseconds from `processStart` to `MarkStarted()`. Emits `0` until started, then holds the final value. |
+| `app.probe.live` | gauge | Always `1` — the process is responding. |
+| `app.probe.ready` | gauge | `1` while accepting traffic, `0` once shutdown begins. |
+| `app.probe.started` | gauge | `1` after `MarkStarted()`, `0` during boot. |
+
+All four land in the `metrics-apm.app.<service>-default` data stream and are
+chartable from **Kibana → Observability → Infrastructure → Metrics Explorer**.
+
+**Use case — tuning Kubernetes probe parameters:**
+
+Plot `app.startup.duration_ms` across pods over time to find the P95 boot
+duration. Then set:
+
+```
+startupProbe.failureThreshold = ceil(P95_boot_ms / (periodSeconds * 1000)) + 1
+```
+
+The `app.probe.*` gauges help answer "did this pod ever flip to not-ready?" in
+a time range — useful when correlating a traffic spike or a rollout with probe
+state.
+
+**Manual wiring:**
+
+```go
+processStart := time.Now() // as early as possible in main
+
+shutdown, _ := apmcore.SetupOTelSDK(ctx)
+// ... set up db, app, mgr ...
+
+if err := runMigrations(db); err != nil {
+    log.Fatal(err)
+}
+mgr.MarkStarted()
+
+apmcore.RegisterStartupMetricsWithManager(processStart, mgr)
+// deregistered automatically at PhasePostDB, before the OTel shutdown
+```
+
+**Via `setup.Builder` (recommended):** call `WithProcessStart` with the
+timestamp captured at the top of `main`. When both `WithOTel` and
+`WithProcessStart` are set, `Build` calls
+`apmcore.RegisterStartupMetricsWithManager` automatically:
+
+```go
+processStart := time.Now()
+
+setup.New().
+    WithOTel(ctx).
+    WithProcessStart(processStart). // ← enables startup metrics
+    WithHealthProbesV2(setup.HealthProbesConfig{}).
+    WithStartupFn(func() error { return runMigrations(db) }).
+    Build(mgr)
+```
+
+`WithProcessStart` has no effect if `WithOTel` is not also set.
 
 #### InstrumentRueidis
 

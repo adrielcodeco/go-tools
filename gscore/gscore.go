@@ -174,8 +174,9 @@ type Manager struct {
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 
-	ready   atomic.Bool
-	started atomic.Bool
+	ready     atomic.Bool
+	started   atomic.Bool
+	startedAt atomic.Int64 // Unix nanoseconds set by MarkStarted; zero until then.
 
 	once     sync.Once
 	doneCh   chan struct{}
@@ -325,9 +326,21 @@ func (m *Manager) IsStarted() bool {
 // MarkStarted signals that the application has finished initializing
 // (migrations ran, caches warmed up, etc.) and is ready to serve traffic.
 // Call this once at the end of your boot sequence, before blocking on
-// ListenAndWait.
+// ListenAndWait. It also records the current wall-clock time so that
+// StartedAt can report the exact moment the startup probe flipped to 200.
 func (m *Manager) MarkStarted() {
+	m.startedAt.Store(time.Now().UnixNano())
 	m.started.Store(true)
+}
+
+// StartedAt returns the wall-clock time at which MarkStarted was called.
+// It returns the zero time if MarkStarted has not been called yet.
+func (m *Manager) StartedAt() time.Time {
+	ns := m.startedAt.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 // Trigger initiates the shutdown sequence programmatically (e.g. from a

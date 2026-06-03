@@ -71,6 +71,7 @@ type Builder struct {
 	healthProbesV2  *HealthProbesConfig
 	healthProbesV3  *HealthProbesConfig
 	startupFn       func() error
+	processStart    *time.Time
 }
 
 // Result is returned by Build and carries handles to the resources that were
@@ -230,6 +231,19 @@ func (c HealthProbesConfig) withDefaults() HealthProbesConfig {
 //	// mgr.MarkStarted() was called automatically — startup probe is now 200.
 func (b *Builder) WithStartupFn(fn func() error) *Builder {
 	b.startupFn = fn
+	return b
+}
+
+// WithProcessStart sets the wall-clock time used as the boot origin for
+// app.startup.duration_ms. Pass time.Now() as early as possible in main —
+// before any other setup runs — so the metric covers the full boot sequence.
+//
+// When WithOTel is also configured and the Manager is a *gscore.Manager,
+// Build automatically calls apmcore.RegisterStartupMetricsWithManager using
+// this timestamp. If WithProcessStart is not called, startup metrics are not
+// registered even when WithOTel is set.
+func (b *Builder) WithProcessStart(t time.Time) *Builder {
+	b.processStart = &t
 	return b
 }
 
@@ -450,6 +464,16 @@ func (b *Builder) build(mgr registrar) (*Result, error) {
 	// 10. Logger sync — flush log buffers last so shutdown logs are not lost.
 	if res.Logger != nil {
 		logcore.RegisterGlobalWithManager(mgr, int(gscore.PhasePostDB), 5*time.Second)
+	}
+
+	// 10b. Startup metrics — register probe-state and boot-duration gatherer.
+	// Requires both WithOTel (so the APM tracer is live) and WithProcessStart
+	// (so the duration origin is explicit). Deregistered at PhasePostDB before
+	// the OTel shutdown so no zeroed metrics are emitted after the tracer closes.
+	if res.Shutdown != nil && b.processStart != nil {
+		if m, ok := mgr.(*gscore.Manager); ok {
+			apmcore.RegisterStartupMetricsWithManager(*b.processStart, m)
+		}
 	}
 
 	// 11. HTTP client logging hook — installed after global logger is set.
