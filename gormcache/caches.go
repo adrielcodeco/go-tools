@@ -17,6 +17,16 @@ type Config struct {
 	Easer    bool
 	Cacher   Cacher
 	TagsFunc func(db *gorm.DB) []string
+	// SkipFunc, when set, is consulted on every SELECT before the cache
+	// lookup. Returning true bypasses the plugin entirely for that query:
+	// no cache read, no cache write and no easer dedup — the query always
+	// hits the database. Statement.SQL and Statement.Table are already
+	// resolved when it is called.
+	//
+	// Note: returning nil from TagsFunc does NOT skip caching — it only
+	// stores the entry untagged (and therefore not invalidatable by tag).
+	// Use SkipFunc to exclude tables from the cache.
+	SkipFunc func(db *gorm.DB) bool
 	Prefix   string
 }
 
@@ -71,6 +81,11 @@ func (c *Caches) query(db *gorm.DB) {
 	}
 
 	identifier := buildIdentifier(db, c.Conf.Prefix)
+
+	if c.Conf.SkipFunc != nil && c.Conf.SkipFunc(db) {
+		c.callbacks[uponQuery](db)
+		return
+	}
 
 	if c.checkCache(db, identifier) {
 		return

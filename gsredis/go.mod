@@ -6,6 +6,7 @@ require (
 	github.com/adrielcodeco/go-tools v0.0.0
 	github.com/adrielcodeco/go-tools/apmcore v0.0.0
 	github.com/adrielcodeco/go-tools/gormcache v0.0.0
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/redis/go-redis/v9 v9.16.0
 )
 
@@ -31,6 +32,7 @@ require (
 	github.com/redis/rueidis/rueidisotel v1.0.75 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.71.0 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.elastic.co/apm/module/apmhttp/v2 v2.7.1 // indirect
 	go.elastic.co/apm/module/apmotel/v2 v2.7.1 // indirect
 	go.elastic.co/apm/module/apmsql/v2 v2.7.1 // indirect

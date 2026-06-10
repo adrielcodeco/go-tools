@@ -2,6 +2,7 @@ package gsredis
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -14,14 +15,19 @@ const tagKeyPrefix = "tag:"
 // RedisCacher implements caches.Cacher using a go-redis UniversalClient.
 //
 // Tag-based invalidation: Store indexes each cache key under its tags via
-// SADD tag:<tag> <key>. Invalidate removes all keys for each tag in the
-// event and then removes the tag set itself.
+// SADD tag:<tag> <key>. Invalidate resolves tags to evict from three sources:
 //
-// Table-based invalidation only works if the caller configures
-// caches.Config.TagsFunc to emit table names as tags — the Store path has no
-// access to table information, so table→key index entries cannot be built
-// automatically. Without TagsFunc, table-based invalidation is a no-op and
-// the caller must rely on TTL expiry.
+//  1. event.Tags — explicit tags set via WithInvalidateTags on the context.
+//  2. table tags — "<table>" for each table in event.Tables, always. This
+//     matches entries tagged with the plain table name (the common TagsFunc
+//     setup) so any mutation on a table evicts its cached SELECTs.
+//  3. entity tags — "<table>:<id>" for each combination of event.Tables x
+//     event.EntityIDs, for entries tagged at entity granularity via WithTags.
+//
+// Tag→key index entries are only built when the caller configures
+// caches.Config.TagsFunc (or uses caches.WithTags at query sites) — the Store
+// path has no access to table information on its own. Without tags on Store,
+// invalidation is a no-op and the caller must rely on TTL expiry.
 type RedisCacher struct {
 	client redis.UniversalClient
 	ttl    time.Duration
@@ -76,13 +82,29 @@ func (r *RedisCacher) Store(ctx context.Context, key string, val *caches.Query[a
 }
 
 func (r *RedisCacher) Invalidate(ctx context.Context, event *caches.InvalidationEvent) error {
-	if len(event.Tags) == 0 {
-		return nil
+	seen := make(map[string]struct{})
+	setKeys := make([]string, 0, len(event.Tags)+len(event.Tables)*(1+len(event.EntityIDs)))
+
+	add := func(t string) {
+		if _, ok := seen[t]; !ok {
+			seen[t] = struct{}{}
+			setKeys = append(setKeys, tagKeyPrefix+t)
+		}
 	}
 
-	setKeys := make([]string, len(event.Tags))
-	for i, tag := range event.Tags {
-		setKeys[i] = tagKeyPrefix + tag
+	for _, t := range event.Tags {
+		add(t)
+	}
+
+	for _, table := range event.Tables {
+		add(table)
+		for _, id := range event.EntityIDs {
+			add(fmt.Sprintf("%s:%v", table, id))
+		}
+	}
+
+	if len(setKeys) == 0 {
+		return nil
 	}
 
 	return r.deleteKeySets(ctx, setKeys)

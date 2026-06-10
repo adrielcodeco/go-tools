@@ -134,26 +134,51 @@ func TestRueidisCache_InvalidateEntityTag_MultipleEntities(t *testing.T) {
 	}
 }
 
-func TestRueidisCache_TableFallback_Disabled(t *testing.T) {
-	cache, _ := newTestCache(t) // no WithTableFallback
+func TestRueidisCache_InvalidateByTableTag_NoEntityIDs(t *testing.T) {
+	cache, _ := newTestCache(t)
 	ctx := caches.WithTags(context.Background(), "products")
 
 	if err := cache.Store(ctx, "key-products", &caches.Query[any]{RowsAffected: 1}); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
 
-	// Invalidate by table with no EntityIDs — should be a no-op without WithTableFallback.
+	// Invalidate by table with no EntityIDs — table tag eviction is always on.
 	event := &caches.InvalidationEvent{Tables: []string{"products"}}
 	if err := cache.Invalidate(context.Background(), event); err != nil {
 		t.Fatalf("Invalidate: %v", err)
 	}
 
-	if got, _ := cache.Get(context.Background(), "key-products", &caches.Query[any]{}); got == nil {
-		t.Fatal("expected key to survive when tableFallback is disabled")
+	if got, _ := cache.Get(context.Background(), "key-products", &caches.Query[any]{}); got != nil {
+		t.Fatal("expected key evicted via table tag")
 	}
 }
 
-func TestRueidisCache_TableFallback_Enabled(t *testing.T) {
+func TestRueidisCache_InvalidateByTableTag_WithEntityIDs(t *testing.T) {
+	// Regression: a single-row INSERT (EntityIDs present) must still evict
+	// entries indexed under the plain table tag — previously only entity
+	// tags were resolved, leaving table-tagged SELECTs stale until TTL.
+	cache, _ := newTestCache(t)
+	ctx := caches.WithTags(context.Background(), "products")
+
+	if err := cache.Store(ctx, "key-products", &caches.Query[any]{RowsAffected: 1}); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	event := &caches.InvalidationEvent{
+		Tables:    []string{"products"},
+		EntityIDs: []any{42},
+	}
+	if err := cache.Invalidate(context.Background(), event); err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+
+	if got, _ := cache.Get(context.Background(), "key-products", &caches.Query[any]{}); got != nil {
+		t.Fatal("expected table-tagged key evicted even when EntityIDs are present")
+	}
+}
+
+func TestRueidisCache_TableFallbackOption_IsNoop(t *testing.T) {
+	// Deprecated option must not change behavior nor error.
 	cache, _ := newTestCache(t, gsrueidis.WithTableFallback())
 	ctx := caches.WithTags(context.Background(), "products")
 
@@ -161,14 +186,13 @@ func TestRueidisCache_TableFallback_Enabled(t *testing.T) {
 		t.Fatalf("Store: %v", err)
 	}
 
-	// Invalidate by table with no EntityIDs — must evict with WithTableFallback.
 	event := &caches.InvalidationEvent{Tables: []string{"products"}}
 	if err := cache.Invalidate(context.Background(), event); err != nil {
 		t.Fatalf("Invalidate: %v", err)
 	}
 
 	if got, _ := cache.Get(context.Background(), "key-products", &caches.Query[any]{}); got != nil {
-		t.Fatal("expected key evicted when tableFallback is enabled")
+		t.Fatal("expected key evicted via table tag")
 	}
 }
 

@@ -19,26 +19,28 @@ const tagKeyPrefix = "tag:"
 // SADD tag:<tag> <key>. Invalidate resolves tags to evict from three sources:
 //
 //  1. event.Tags — explicit tags set via WithInvalidateTags on the context.
-//  2. entity tags — "<table>:<id>" for each combination of event.Tables x
-//     event.EntityIDs, invalidating only the specific entity that changed.
-//  3. table tags — "<table>" fallback when there are no EntityIDs, only when
-//     WithTableFallback() option is set (default: disabled).
+//  2. table tags — "<table>" for each table in event.Tables, always. This
+//     matches entries tagged with the plain table name (the common TagsFunc
+//     setup) so any mutation on a table evicts its cached SELECTs.
+//  3. entity tags — "<table>:<id>" for each combination of event.Tables x
+//     event.EntityIDs, for entries tagged at entity granularity via WithTags.
 type RueidisCache struct {
-	client        rueidis.Client
-	ttl           time.Duration
-	tableFallback bool
+	client rueidis.Client
+	ttl    time.Duration
 }
 
 // Option configures a RueidisCache.
 type Option func(*RueidisCache)
 
-// WithTableFallback enables whole-table tag invalidation when a mutation has
-// no resolvable EntityIDs (e.g. bulk UPDATE/DELETE). Disabled by default — opt
-// in only if you tag queries with plain "<table>" tags via TagsFunc or WithTags.
+// WithTableFallback is deprecated and has no effect: whole-table tag
+// invalidation is now always enabled. Entries indexed under a plain "<table>"
+// tag were previously only evicted when a mutation had no resolvable
+// EntityIDs, which silently left stale entries behind on every single-row
+// INSERT/UPDATE/DELETE.
+//
+// Deprecated: table tags are always invalidated; this option is a no-op.
 func WithTableFallback() Option {
-	return func(r *RueidisCache) {
-		r.tableFallback = true
-	}
+	return func(r *RueidisCache) {}
 }
 
 // NewRueidisCache creates a RueidisCache backed by client with the given TTL.
@@ -116,12 +118,9 @@ func (r *RueidisCache) Invalidate(ctx context.Context, event *caches.Invalidatio
 	}
 
 	for _, table := range event.Tables {
-		if len(event.EntityIDs) > 0 {
-			for _, id := range event.EntityIDs {
-				add(fmt.Sprintf("%s:%v", table, id))
-			}
-		} else if r.tableFallback {
-			add(table)
+		add(table)
+		for _, id := range event.EntityIDs {
+			add(fmt.Sprintf("%s:%v", table, id))
 		}
 	}
 

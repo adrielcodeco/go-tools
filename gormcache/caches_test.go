@@ -617,3 +617,79 @@ func TestCaches_storeInCache_WithTagsFunc(t *testing.T) {
 		t.Errorf("expected first tag 'users-query', got %q", captureMock.storeTags[0])
 	}
 }
+
+func TestCaches_query_SkipFunc(t *testing.T) {
+	newCaches := func(skip bool, mock *cacherMock, queryRuns *int32) *Caches {
+		return &Caches{
+			Conf: &Config{
+				Easer:  true,
+				Cacher: mock,
+				SkipFunc: func(db *gorm.DB) bool {
+					return skip
+				},
+			},
+			queue: &sync.Map{},
+			callbacks: map[queryType]func(db *gorm.DB){
+				uponQuery: func(db *gorm.DB) {
+					atomic.AddInt32(queryRuns, 1)
+					db.Statement.Dest.(*mockDest).Result = db.Statement.SQL.String()
+				},
+			},
+		}
+	}
+
+	runQuery := func(t *testing.T, caches *Caches, sql string) {
+		t.Helper()
+		db, _ := gorm.Open(tests.DummyDialector{}, &gorm.Config{})
+		db.Statement.Dest = &mockDest{}
+		db.Statement.SQL.WriteString(sql)
+		caches.query(db)
+		if db.Error != nil {
+			t.Fatalf("unexpected error: %v", db.Error)
+		}
+		if res := db.Statement.Dest.(*mockDest); res.Result != sql {
+			t.Errorf("expected result %q, got %q", sql, res.Result)
+		}
+	}
+
+	countStored := func(mock *cacherMock) int {
+		mock.init()
+		stored := 0
+		mock.store.Range(func(_, _ any) bool { stored++; return true })
+		return stored
+	}
+
+	t.Run("skip true bypasses cache entirely", func(t *testing.T) {
+		var queryRuns int32
+		mock := &cacherMock{}
+		caches := newCaches(true, mock, &queryRuns)
+
+		// The same query twice — each run must hit the DB; nothing may be
+		// read from or written to the cache.
+		runQuery(t, caches, "skip-query")
+		runQuery(t, caches, "skip-query")
+
+		if act := atomic.LoadInt32(&queryRuns); act != 2 {
+			t.Errorf("expected the DB query to run 2 times (no caching), ran %d", act)
+		}
+		if stored := countStored(mock); stored != 0 {
+			t.Errorf("expected nothing stored in cache, found %d entries", stored)
+		}
+	})
+
+	t.Run("skip false keeps caching", func(t *testing.T) {
+		var queryRuns int32
+		mock := &cacherMock{}
+		caches := newCaches(false, mock, &queryRuns)
+
+		runQuery(t, caches, "cached-query")
+		runQuery(t, caches, "cached-query")
+
+		if act := atomic.LoadInt32(&queryRuns); act != 1 {
+			t.Errorf("expected the DB query to run once (second served from cache), ran %d", act)
+		}
+		if stored := countStored(mock); stored != 1 {
+			t.Errorf("expected 1 entry stored in cache, found %d", stored)
+		}
+	})
+}

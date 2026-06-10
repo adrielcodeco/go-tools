@@ -1440,6 +1440,8 @@ OTel spans via `apmcore.InstrumentCacher`.
   primary key values, and mutation type.
 - **Tag-based invalidation** — tag cached queries via `Config.TagsFunc` and
   selectively evict them with `caches.WithInvalidateTags` on mutations.
+- **Cache bypass per query** — `Config.SkipFunc` excludes queries (e.g. whole
+  tables) from the cache entirely: no cache read, no write, no easer dedup.
 - **Safe under concurrent load** — invalidation only fires after a mutation
   completes without error; failed or short-circuited operations (e.g. autobatch)
   do not evict the cache.
@@ -1588,15 +1590,22 @@ multi-key `DEL`, making it the higher-throughput option for write-heavy
 invalidation workloads.
 
 > **Tag index note:** both backends build the tag→key index only from tags
-> provided via `Config.TagsFunc`. If `TagsFunc` is not set, `Invalidate` is
-> a no-op (entries expire via TTL). To invalidate by table, emit the table
-> name as a tag:
+> provided via `Config.TagsFunc` (or `caches.WithTags` at query sites). If no
+> tags are stored, `Invalidate` is a no-op (entries expire via TTL). To
+> invalidate by table, emit the table name as a tag:
 >
 > ```go
 > TagsFunc: func(db *gorm.DB) []string {
 >     return []string{db.Statement.Table}
 > },
 > ```
+
+On every mutation both backends resolve and evict, in addition to explicit
+`event.Tags`, the plain table tag (`"<table>"`) for each affected table —
+always — plus entity tags (`"<table>:<id>"`) for each affected primary key.
+`gsrueidis.WithTableFallback()` is deprecated and a no-op: table-tag eviction
+is unconditional, since skipping it on single-row mutations silently left
+table-tagged SELECTs stale until TTL.
 
 ### Tag-based invalidation
 
@@ -1644,6 +1653,35 @@ func (c *memoryCacher) Invalidate(ctx context.Context, event *caches.Invalidatio
     return nil
 }
 ```
+
+### Skipping tables (`Config.SkipFunc`)
+
+Some tables must never be served from cache — typically rows used in
+validation reads where staleness breaks correctness (balances, idempotency
+records, dependency/audit tables). `SkipFunc` is consulted on every SELECT
+before the cache lookup; returning `true` bypasses the plugin entirely (no
+cache read, no write, no easer dedup) and the query always hits the database:
+
+```go
+var skipTables = map[string]struct{}{
+    "TransactionsDependency": {},
+}
+
+cachesPlugin := &caches.Caches{Conf: &caches.Config{
+    Cacher: cacher,
+    SkipFunc: func(db *gorm.DB) bool {
+        _, skip := skipTables[db.Statement.Table]
+        return skip
+    },
+    TagsFunc: func(db *gorm.DB) []string {
+        return []string{db.Statement.Table}
+    },
+}}
+```
+
+> **Warning:** returning `nil` from `TagsFunc` does **not** skip caching — the
+> entry is still cached, just untagged, which makes it *uninvalidatable* until
+> TTL. Use `SkipFunc` to exclude queries from the cache.
 
 ### OTel instrumentation
 
