@@ -86,11 +86,20 @@ func TestRedactsSensitiveHeaderAndBody(t *testing.T) {
 	req := httptest.NewRequest("POST", "/pay",
 		bytes.NewReader([]byte(`{"amount":100,"password":"hunter2"}`)))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer tok")
 
 	if _, err := app.Test(req); err != nil {
 		t.Fatalf("Test: %v", err)
 	}
 	inc := findIncoming(t, logs)
+
+	headers, ok := inc.Req.Headers.(map[string]string)
+	if !ok {
+		t.Fatalf("headers type %T (want map[string]string)", inc.Req.Headers)
+	}
+	if headers["Authorization"] != logcore.RedactMask {
+		t.Errorf("Authorization = %q, want mask", headers["Authorization"])
+	}
 
 	body, ok := inc.Req.Body.(map[string]any)
 	if !ok {
@@ -101,6 +110,27 @@ func TestRedactsSensitiveHeaderAndBody(t *testing.T) {
 	}
 	if body["amount"] == nil {
 		t.Error("amount should be preserved")
+	}
+}
+
+func TestCapturesRequestHeaders(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, DisableRedaction: true}))
+	app.Get("/x", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set("X-Request-ID", "req-123")
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	inc := findIncoming(t, logs)
+	headers, ok := inc.Req.Headers.(map[string]string)
+	if !ok {
+		t.Fatalf("headers not captured: %T", inc.Req.Headers)
+	}
+	if headers["X-Request-Id"] != "req-123" && headers["X-Request-ID"] != "req-123" {
+		t.Errorf("X-Request-ID not captured, headers = %v", headers)
 	}
 }
 

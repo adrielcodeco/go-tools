@@ -145,11 +145,10 @@ func getReqQueryString(c *fiber.Ctx) any {
 }
 
 func getReqHeaders(c *fiber.Ctx) any {
-	out := make(map[string][]string)
-	if err := c.ReqHeaderParser(&out); err != nil {
-		return nil
-	}
-	return logcore.FlattenHeaders(out)
+	// GetReqHeaders returns map[string][]string directly. ReqHeaderParser
+	// (used previously) requires a pointer-to-struct and fails on a map, so
+	// request headers were silently dropped.
+	return logcore.FlattenHeaders(c.GetReqHeaders())
 }
 
 func getReqBody(c *fiber.Ctx) any {

@@ -1547,11 +1547,6 @@ Safety guards: a value is only partially revealed when its kept tail is at most
 (numbers, bools, nested objects) under a sensitive key are always fully masked.
 Partial reveal applies in both the schema layer and the core layer below.
 
-> **Note:** Fiber v2 request headers are not currently captured by the
-> middleware (a `logfiber` parsing quirk), so header redaction there applies
-> only to response headers; Fiber v3 redacts both. Body redaction works on
-> both. Bodies are masked in either case.
-
 **2. Core-level (every log call).** `Options{RedactFields: true}` wraps the
 zap core with `logcore.NewRedactCore`, so *any* log field with a sensitive
 key — anywhere in the codebase, not just request/response logs — is masked
