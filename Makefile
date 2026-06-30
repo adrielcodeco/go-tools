@@ -94,6 +94,20 @@ define do_tag
 	echo "Done. Review with 'git tag | grep $$ver', then 'make push'."
 endef
 
+# $(call push_release,vX.Y.Z) — push the current branch and exactly this
+# version's tags (root + every module) to $(REMOTE). Pushing only the new tags
+# avoids re-publishing unrelated local tags.
+define push_release
+	@set -euo pipefail; \
+	ver='$(1)'; \
+	branch=$$(git rev-parse --abbrev-ref HEAD); \
+	tags="$$ver"; \
+	for m in $(MODULES); do tags="$$tags $$m/$$ver"; done; \
+	echo "Pushing $$branch + $$ver tags to $(REMOTE)"; \
+	git push $(REMOTE) "$$branch"; \
+	git push $(REMOTE) $$tags
+endef
+
 major: _check-clean ## Bump major (vX.Y.Z -> v(X+1).0.0) and tag
 	$(call do_tag,$(NEXT_MAJOR))
 
@@ -103,12 +117,23 @@ minor: _check-clean ## Bump minor (vX.Y.Z -> v.(Y+1).0) and tag
 patch: _check-clean ## Bump patch (vX.Y.Z -> vX.Y.(Z+1)) and tag
 	$(call do_tag,$(NEXT_PATCH))
 
-push: ## Push the current branch and all tags to $(REMOTE)
+push: ## Push the current branch and ALL local tags to $(REMOTE)
 	@branch=$$(git rev-parse --abbrev-ref HEAD); \
-	echo "Pushing $$branch + tags to $(REMOTE)"; \
+	echo "Pushing $$branch + all tags to $(REMOTE)"; \
 	git push $(REMOTE) "$$branch"; \
 	git push $(REMOTE) --tags
 
-bump-major: major push ## Bump major and push
-bump-minor: minor push ## Bump minor and push
-bump-patch: patch push ## Bump patch and push
+# bump-* do everything in one go: verify clean, tag root + all modules, then
+# push the branch and exactly the new tags. Single recipe per target so tagging
+# always happens before the push (no prerequisite ordering / -j races).
+bump-major: _check-clean ## Bump major, tag, and push — all in one
+	$(call do_tag,$(NEXT_MAJOR))
+	$(call push_release,$(NEXT_MAJOR))
+
+bump-minor: _check-clean ## Bump minor, tag, and push — all in one
+	$(call do_tag,$(NEXT_MINOR))
+	$(call push_release,$(NEXT_MINOR))
+
+bump-patch: _check-clean ## Bump patch, tag, and push — all in one
+	$(call do_tag,$(NEXT_PATCH))
+	$(call push_release,$(NEXT_PATCH))
