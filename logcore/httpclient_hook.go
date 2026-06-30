@@ -19,51 +19,64 @@ import (
 //	httpclient.SetHook(logcore.HTTPClientHook())
 //
 // The log line uses the global logger decorated with apmcore trace
-// fields (via LogCtx). For a custom logger, see HookFor.
-func HTTPClientHook() httpclient.Hook { return HookFor(nil) }
+// fields (via LogCtx). Sensitive headers and body fields are masked
+// with DefaultRedactor before logging. For a custom logger, see HookFor;
+// for a custom redaction policy, see HookForRedacting.
+func HTTPClientHook() httpclient.Hook { return HookForRedacting(nil, DefaultRedactor()) }
 
-// HookFor returns the same hook bound to l. Nil falls back to the
-// global logger.
-func HookFor(l *Logger) httpclient.Hook {
-	return func(r httpclient.Record) {
+// HookFor returns the same hook bound to l, applying DefaultRedactor. Nil
+// falls back to the global logger.
+func HookFor(l *Logger) httpclient.Hook { return HookForRedacting(l, DefaultRedactor()) }
+
+// HookForRedacting returns the hook bound to l with redaction policy r. A nil
+// l falls back to the global logger; a nil r disables redaction (the request
+// and response are logged verbatim — use only when the data is known safe).
+func HookForRedacting(l *Logger, r *Redactor) httpclient.Hook {
+	return func(rec httpclient.Record) {
 		var logger *zap.Logger
 		if l != nil {
-			logger = l.LogCtx(r.Ctx)
+			logger = l.LogCtx(rec.Ctx)
 		} else {
-			logger = LogCtx(r.Ctx)
+			logger = LogCtx(rec.Ctx)
 		}
 
 		status := "Ø"
-		if r.Status > 0 {
-			status = strconv.Itoa(r.Status)
+		if rec.Status > 0 {
+			status = strconv.Itoa(rec.Status)
 		}
 
 		var errStr *string
-		if r.Err != nil {
-			s := r.Err.Error()
+		if rec.Err != nil {
+			s := rec.Err.Error()
+			if r != nil {
+				s = RedactString(s)
+			}
 			errStr = &s
 		}
 
 		var reqHeaders any
-		if len(r.ReqHeaders) > 0 {
-			reqHeaders = r.ReqHeaders
+		if len(rec.ReqHeaders) > 0 {
+			reqHeaders = rec.ReqHeaders
 		}
 
 		out := Outgoing{
 			Req: &Req{
 				Headers: reqHeaders,
-				Body:    DecodeJSONBody(r.ReqBody),
+				Body:    DecodeJSONBody(rec.ReqBody),
 			},
 			Res: &Res{
-				Body:       DecodeJSONBody(r.ResBody),
+				Body:       DecodeJSONBody(rec.ResBody),
 				StatusCode: status,
 			},
 			Error:        errStr,
-			ResponseTime: r.ResponseTime.String(),
+			ResponseTime: rec.ResponseTime.String(),
+		}
+		if r != nil {
+			out = r.Outgoing(out)
 		}
 
-		msg := fmt.Sprintf("← outgoing ← [%s] %s - %s", r.Method, r.URL, status)
-		logger.Info(msg, zap.Any("outgoing", out), zap.Int("attempt", r.Attempt))
+		msg := fmt.Sprintf("← outgoing ← [%s] %s - %s", rec.Method, rec.URL, status)
+		logger.Info(msg, zap.Any("outgoing", out), zap.Int("attempt", rec.Attempt))
 	}
 }
 

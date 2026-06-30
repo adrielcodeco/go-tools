@@ -75,6 +75,69 @@ func TestLogsIncoming(t *testing.T) {
 	}
 }
 
+func TestRedactsSensitiveHeaderAndBody(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l})) // default redactor
+	app.Post("/pay", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	req := httptest.NewRequest("POST", "/pay",
+		bytes.NewReader([]byte(`{"amount":100,"password":"hunter2"}`)))
+	req.Header.Set("Content-Type", "application/json")
+
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	inc := findIncoming(t, logs)
+
+	body, ok := inc.Req.Body.(map[string]any)
+	if !ok {
+		t.Fatalf("body type %T", inc.Req.Body)
+	}
+	if body["password"] != logcore.RedactMask {
+		t.Errorf("body.password = %v, want mask", body["password"])
+	}
+	if body["amount"] == nil {
+		t.Error("amount should be preserved")
+	}
+}
+
+func TestDisableRedaction(t *testing.T) {
+	l, logs := newObservedLogger(t)
+	app := fiber.New()
+	app.Use(logfiber.Middleware(logfiber.Config{Logger: l, DisableRedaction: true}))
+	app.Post("/pay", func(c *fiber.Ctx) error { return c.SendStatus(200) })
+
+	req := httptest.NewRequest("POST", "/pay",
+		bytes.NewReader([]byte(`{"password":"hunter2"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	if _, err := app.Test(req); err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	inc := findIncoming(t, logs)
+	body, _ := inc.Req.Body.(map[string]any)
+	if body["password"] != "hunter2" {
+		t.Errorf("body.password = %v, want verbatim with redaction disabled", body["password"])
+	}
+}
+
+func findIncoming(t *testing.T, logs *observer.ObservedLogs) *logcore.Incoming {
+	t.Helper()
+	if logs.Len() == 0 {
+		t.Fatal("no log entries")
+	}
+	for _, f := range logs.AllUntimed()[0].Context {
+		if f.Key == "incoming" {
+			v := f.Interface.(logcore.Incoming)
+			return &v
+		}
+	}
+	t.Fatal("missing incoming field")
+	return nil
+}
+
 func TestSkipPaths(t *testing.T) {
 	l, logs := newObservedLogger(t)
 	app := fiber.New()

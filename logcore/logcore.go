@@ -51,6 +51,17 @@ type Options struct {
 	Version     string
 	Environment string
 
+	// RedactFields wraps the logger core with NewRedactCore so the values
+	// of sensitive fields (Authorization, Cookie, password, token, card
+	// data, …) are masked globally before encoding — for every log call,
+	// not just the HTTP request/response logs. Defaults to false to stay
+	// backwards-compatible; new services should enable it.
+	RedactFields bool
+
+	// Redactor overrides the policy used when RedactFields is true. Nil
+	// uses DefaultRedactor (the package default key/pattern set).
+	Redactor *Redactor
+
 	// Extra is appended to the zap.New options list. Use it for hooks,
 	// custom AddCallerSkip, ReplaceCore, etc.
 	Extra []zap.Option
@@ -80,6 +91,15 @@ func New(opts Options) (*Logger, error) {
 	if !opts.DisableAPMCore {
 		zapOpts = append(zapOpts, zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 			return apmcore.WrapZapCore(c)
+		}))
+	}
+	if opts.RedactFields {
+		// Applied last so it is the outermost core: fields are masked
+		// before reaching the APM core (so APM error events are redacted
+		// too) and the encoder.
+		red := opts.Redactor
+		zapOpts = append(zapOpts, zap.WrapCore(func(c zapcore.Core) zapcore.Core {
+			return NewRedactCore(c, red)
 		}))
 	}
 

@@ -1333,13 +1333,14 @@ go get github.com/adrielcodeco/go-tools/logfiberv3     # Fiber v3
 
 ```go
 l, _ := logcore.New(logcore.Options{
-    Service:     "ledger",
-    Version:     "1.2.3",
-    Environment: "production",
+    Service:      "ledger",
+    Version:      "1.2.3",
+    Environment:  "production",
+    RedactFields: true, // mask sensitive fields on every log call (recommended)
 })
 logcore.SetGlobal(l)
 
-// Outgoing logs for httpclient.
+// Outgoing logs for httpclient (request/response secrets masked by default).
 httpclient.SetHook(logcore.HTTPClientHook())
 ```
 
@@ -1376,6 +1377,200 @@ The `httpclient.SetHook(logcore.HTTPClientHook())` emits the **same
 shape** under the `outgoing` key, so Kibana queries like
 `outgoing.res.body.id` match outbound calls and `incoming.req.body.id`
 match inbound — without separate dashboards per direction.
+
+### Secret redaction
+
+Sensitive headers and body fields are masked **by default** before they
+reach the encoder, so credentials and PII never land in Kibana in clear
+text. There are two complementary layers:
+
+**1. Schema-level (request/response logs).** The Fiber middlewares and the
+`httpclient` hook run their `incoming` / `outgoing` payloads through a
+`logcore.Redactor` before logging. The default policy
+(`logcore.DefaultRedactor()`) masks a conservative-but-broad set of keys
+(case-insensitive) with the constant `logcore.RedactMask` (`"[REDACTED]"`).
+
+**Default exact keys** (`logcore.DefaultSensitiveKeys`) — matched case-insensitively:
+
+| Group | Keys |
+|---|---|
+| Auth / session headers | `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`, `x-access-token`, `x-csrf-token`, `x-xsrf-token`, `x-amz-security-token` |
+| Credentials / tokens | `password`, `passwd`, `pwd`, `secret`, `client_secret`, `clientsecret`, `token`, `access_token`, `accesstoken`, `refresh_token`, `refreshtoken`, `id_token`, `idtoken`, `api_key`, `apikey`, `private_key`, `privatekey` |
+| Payments / PII | `card`, `card_number`, `cardnumber`, `pan`, `cvv`, `cvc`, `cvv2`, `security_code`, `securitycode`, `ssn`, `taxid`, `tax_id` |
+
+**Default substring patterns** (`logcore.DefaultSensitivePatterns`) — any key
+*containing* one of these (case-insensitive) is masked, catching fields like
+`user_password` or `stripeSecretKey`:
+
+`password`, `secret`, `passwd`, `authorization`
+
+A pattern matches anywhere in the key, so a single entry covers a whole family
+of field names without listing each one. For example, the default `secret`
+pattern matches all of these:
+
+| Field name | Masked? | Why |
+|---|---|---|
+| `secret` | ✅ | exact + contains `secret` |
+| `client_secret` | ✅ | contains `secret` |
+| `stripeSecretKey` | ✅ | contains `secret` (case-insensitive) |
+| `SECRET_TOKEN` | ✅ | contains `secret` (case-insensitive) |
+| `secrets` | ✅ | contains `secret` |
+| `secretariat` | ⚠️ | contains `secret` — a false positive; see below |
+
+Nested maps and arrays in the decoded JSON body are walked recursively, and
+`Bearer <token>` sequences inside error messages are scrubbed too. The
+caller's data is never mutated — redaction always returns a copy.
+
+```json
+{
+  "incoming": {
+    "req": {
+      "headers": { "authorization": "[REDACTED]", "content-type": "application/json" },
+      "body":    { "amount": 100, "card": "[REDACTED]", "password": "[REDACTED]" }
+    }
+  }
+}
+```
+
+Customize or disable per middleware:
+
+```go
+// Custom policy (defaults + extra keys):
+red := logcore.NewRedactor(logcore.RedactorOptions{
+    Extra: []string{"account_balance", "x-internal-token"},
+})
+app.Use(logfiber.Middleware(logfiber.Config{Redactor: red}))
+
+// Custom policy for the httpclient hook:
+httpclient.SetHook(logcore.HookForRedacting(nil, red))
+
+// Opt out entirely (log verbatim — only when payloads are known safe):
+app.Use(logfiber.Middleware(logfiber.Config{DisableRedaction: true}))
+```
+
+#### Overriding the defaults
+
+Each `RedactorOptions` field composes differently, so you can extend, trim, or
+replace the default policy:
+
+| Field | `nil` (unset) | `[]string{}` (empty) | with values |
+|---|---|---|---|
+| `Keys` | uses `DefaultSensitiveKeys` | **disables** exact matching | **replaces** the default exact set |
+| `Patterns` | uses `DefaultSensitivePatterns` | **disables** substring matching | **replaces** the default patterns |
+| `Extra` | — | — | **adds** to the resolved exact set |
+| `RemoveKeys` | — | — | **drops** keys from the resolved exact set |
+
+```go
+// Add to the defaults:
+logcore.NewRedactor(logcore.RedactorOptions{
+    Extra: []string{"account_balance", "x-internal-token"},
+})
+
+// Drop a default key (keep everything else):
+logcore.NewRedactor(logcore.RedactorOptions{
+    RemoveKeys: []string{"cookie"},
+})
+
+// Replace the whole policy (defaults ignored):
+logcore.NewRedactor(logcore.RedactorOptions{
+    Keys:     []string{"authorization", "x-my-token"},
+    Patterns: []string{}, // also turn substring matching off
+})
+```
+
+`Keys` / `Extra` / `RemoveKeys` are applied in that order. Note that
+`RemoveKeys` only affects *exact* matching — a key also caught by a substring
+pattern (e.g. `client_secret` matches the `secret` pattern) stays masked unless
+you override `Patterns` too.
+
+#### Pattern matching (substring)
+
+`Patterns` is the substring counterpart to `Keys`: rather than listing every
+exact field name, you list a token and **any key that contains it** is masked.
+Reach for a pattern when a sensitive value shows up under many unpredictable
+names (`db_password`, `smtpPassword`, `adminPasswordHash`, …) — one pattern
+covers them all.
+
+```go
+// Extend the defaults with extra patterns (defaults still apply):
+red := logcore.NewRedactor(logcore.RedactorOptions{
+    Patterns: append(logcore.DefaultSensitivePatterns,
+        "credential", // db_credential, awsCredentials, …
+        "ssn",        // applicant_ssn, ssn_last4, …
+        "_key",       // signing_key, encryption_key, … (but not "monkey": see caveat)
+    ),
+})
+```
+
+```go
+// Replace the defaults with your own pattern set only:
+red := logcore.NewRedactor(logcore.RedactorOptions{
+    Keys:     []string{},                       // turn exact matching off
+    Patterns: []string{"token", "passwd", "pii"},
+})
+// Masks: "access_token", "x_passwd", "pii_blob", "customerPII", …
+```
+
+The match is plain `strings.Contains` on the lowercased key — there is no word
+boundary, so choose tokens carefully:
+
+- **Good:** distinctive stems like `password`, `secret`, `credential`. Broad
+  but safe — over-matching only costs a masked field, never a leak.
+- **Caveat:** short or common tokens over-match. `key` would also mask
+  `monkey` and `keyboard_layout`; `pan` would mask `company` and `plan`. Prefer
+  a more specific token (`_key`, `card_number`) or use an exact `Keys`/`Extra`
+  entry instead.
+
+Patterns and exact keys are checked together — a key is masked if it matches
+*either*. Pattern matching also feeds the core-level redactor when
+`Options{RedactFields: true}` is set, so a stray `zap.String("db_password", …)`
+anywhere in the code is caught too.
+
+#### Partial reveal
+
+Instead of fully masking, specific keys can keep their last *N* characters —
+useful for correlating a card or token in logs without exposing it. Configure
+per key via `PartialReveal`; unlisted keys stay fully masked, so the default
+policy is unchanged:
+
+```go
+red := logcore.NewRedactor(logcore.RedactorOptions{
+    PartialReveal: map[string]int{"card": 4, "pan": 4},
+})
+// "4111111111111111" → "[REDACTED]…1111"
+// "authorization"    → "[REDACTED]"        (not configured → full mask)
+```
+
+Safety guards: a value is only partially revealed when its kept tail is at most
+**half** the value (so a short secret never ends up mostly exposed — e.g. a
+3-char `cvv` with reveal 4 falls back to a full mask), and non-string values
+(numbers, bools, nested objects) under a sensitive key are always fully masked.
+Partial reveal applies in both the schema layer and the core layer below.
+
+> **Note:** Fiber v2 request headers are not currently captured by the
+> middleware (a `logfiber` parsing quirk), so header redaction there applies
+> only to response headers; Fiber v3 redacts both. Body redaction works on
+> both. Bodies are masked in either case.
+
+**2. Core-level (every log call).** `Options{RedactFields: true}` wraps the
+zap core with `logcore.NewRedactCore`, so *any* log field with a sensitive
+key — anywhere in the codebase, not just request/response logs — is masked
+on the way out. This catches a stray `zap.String("authorization", …)` or a
+`zap.Any("payload", m)` that contains a nested secret. It is applied as the
+outermost core, so APM error events are redacted too.
+
+```go
+l, _ := logcore.New(logcore.Options{
+    Service:      "ledger",
+    RedactFields: true,                 // global field redaction
+    Redactor:     logcore.NewRedactor(logcore.RedactorOptions{ /* … */ }), // optional
+})
+```
+
+`RedactFields` defaults to `false` for backwards compatibility; new services
+should enable it. The two layers compose — schema redaction keeps the
+structured `incoming`/`outgoing` shape readable, and the core layer is the
+safety net for everything else.
 
 ### Trace correlation everywhere else
 

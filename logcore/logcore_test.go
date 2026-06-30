@@ -614,9 +614,10 @@ func TestHookFor_ReqHeadersPopulated(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected outgoing.Req.Headers to be map[string]string, got %T", out.Req.Headers)
 	}
+	// Authorization is masked by the default redactor; the rest pass through.
 	wantHeaders := map[string]string{
 		"Content-Type":  "application/json",
-		"Authorization": "Bearer tok",
+		"Authorization": logcore.RedactMask,
 		"X-Request-ID":  "req-123",
 	}
 	for k, want := range wantHeaders {

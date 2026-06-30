@@ -34,11 +34,23 @@ type Config struct {
 
 	// Logger overrides the global logcore logger. Nil → use the global.
 	Logger *logcore.Logger
+
+	// Redactor masks sensitive headers and body fields before logging.
+	// Nil → logcore.DefaultRedactor (safe defaults). Set DisableRedaction
+	// to log verbatim instead.
+	Redactor *logcore.Redactor
+
+	// DisableRedaction logs requests/responses verbatim, with no masking.
+	// Use only when the payloads are known to be free of secrets/PII.
+	DisableRedaction bool
 }
 
 func (c Config) withDefaults() Config {
 	if c.SkipPaths == nil {
 		c.SkipPaths = []string{"/live", "/ready", "/health"}
+	}
+	if c.Redactor == nil && !c.DisableRedaction {
+		c.Redactor = logcore.DefaultRedactor()
 	}
 	return c
 }
@@ -91,8 +103,14 @@ func Middleware(cfg Config) fiber.Handler {
 			},
 			ResponseTime: responseTime.String(),
 		}
+		if cfg.Redactor != nil {
+			incoming = cfg.Redactor.Incoming(incoming)
+		}
 		if hErr != nil {
 			errMsg := hErr.Error()
+			if cfg.Redactor != nil {
+				errMsg = logcore.RedactString(errMsg)
+			}
 			incoming.Error = &errMsg
 			logger.Error(msg, zap.Any("incoming", incoming), zap.String("error.message", errMsg))
 		} else {
