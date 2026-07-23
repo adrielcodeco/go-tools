@@ -44,6 +44,18 @@ type Options struct {
 	// disable (e.g. in tests where you don't want APM noise).
 	DisableAPMCore bool
 
+	// SentryHook wraps the logger core with NewSentryCore so log entries
+	// at or above SentryLevel (default Error) are also reported to Sentry
+	// as events, cross-linked to the APM trace. Requires sentrycore to be
+	// initialized (SetupSentry); when Sentry is disabled the hook is a
+	// no-op, so it is safe to leave enabled unconditionally. Defaults to
+	// false to stay backwards-compatible.
+	SentryHook bool
+
+	// SentryLevel is the minimum level forwarded to Sentry when
+	// SentryHook is true. Zero defaults to ErrorLevel.
+	SentryLevel zapcore.Level
+
 	// Service / Version / Environment are added as permanent fields on
 	// every log line — useful as Kibana filters when many services
 	// share an index.
@@ -91,6 +103,15 @@ func New(opts Options) (*Logger, error) {
 	if !opts.DisableAPMCore {
 		zapOpts = append(zapOpts, zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 			return apmcore.WrapZapCore(c)
+		}))
+	}
+	if opts.SentryHook {
+		// Wrapped after the APM core but before redaction (below) so the
+		// fields forwarded to Sentry are already masked when
+		// RedactFields is set.
+		lvl := opts.SentryLevel
+		zapOpts = append(zapOpts, zap.WrapCore(func(c zapcore.Core) zapcore.Core {
+			return NewSentryCore(c, lvl)
 		}))
 	}
 	if opts.RedactFields {

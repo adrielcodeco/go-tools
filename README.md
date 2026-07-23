@@ -11,7 +11,8 @@ A toolbox for production [Fiber](https://github.com/gofiber/fiber) + [GORM](http
 7. **`logcore` + `logfiber` / `logfiberv3`** — Structured zap logger pre-wired for APM (auto-error capture, trace.id correlation), with Fiber incoming middleware and an httpclient outgoing hook that share the same `req`/`res`/`responseTime` schema.
 8. **`gormautobatch`** — GORM plugin that transparently batches Create/Update/Delete operations based on measured P95 latency, reducing round-trips under load with per-op SAVEPOINT isolation.
 9. **`gormcache`** — GORM plugin for query result caching and request deduplication (easer). Ships with ready-made Redis and Rueidis backends (`gsredis.NewRedisCacher`, `gsrueidis.NewRueidisCache`) and optional OTel instrumentation via `apmcore.InstrumentCacher`.
-10. **`setup`** — One-call bootstrap that wires the gscore Manager, Fiber app, GORM, APM, logger, httpclient, gsredis, gsrueidis, and gormcache together in the correct order. Recommended for production services.
+10. **`sentrycore` + `sentryfiber` / `sentryfiberv3`** — Sentry error/crash reporting: no-op when the DSN is empty, a zap hook that reports `Error`+ logs, Fiber panic-recovery middleware, and outgoing-HTTP breadcrumbs — all cross-linked to the Elastic APM trace. Complements (does not replace) `apmfiber`, which owns tracing and metrics.
+11. **`setup`** — One-call bootstrap that wires the gscore Manager, Fiber app, GORM, APM, Sentry, logger, httpclient, gsredis, gsrueidis, and gormcache together in the correct order. Recommended for production services.
 
 **Module:** `github.com/adrielcodeco/go-tools`
 
@@ -20,8 +21,9 @@ A toolbox for production [Fiber](https://github.com/gofiber/fiber) + [GORM](http
 | Request-scoped transactions | `…/txctx` | `…/txctxv3` | 1.22 / 1.25 |
 | Graceful shutdown | `…/gsfiber` | `…/gsfiberv3` | 1.22 / 1.25 |
 | Elastic APM instrumentation | `…/apmfiber` | `…/apmfiberv3` | 1.22 / 1.25 |
+| Sentry error reporting | `…/sentryfiber` | `…/sentryfiberv3` | 1.25 |
 
-Each trio shares a framework-agnostic engine (`txcore`, `gscore`, `apmcore`) so both Fiber versions have identical semantics.
+Each trio shares a framework-agnostic engine (`txcore`, `gscore`, `apmcore`, `sentrycore`) so both Fiber versions have identical semantics.
 
 ---
 
@@ -77,6 +79,18 @@ Each trio shares a framework-agnostic engine (`txcore`, `gscore`, `apmcore`) so 
   - [APM transaction context in txctx](#apm-transaction-context-in-txctx)
   - [Local stack](#local-stack)
   - [Pitfall index](#pitfall-index)
+- [Sentry error reporting (`sentryfiber` / `sentryfiberv3`)](#sentry-error-reporting-sentryfiber--sentryfiberv3)
+  - [Packages](#packages-1)
+  - [How it relates to Elastic APM](#how-it-relates-to-elastic-apm)
+  - [Features](#features-3)
+  - [Installation](#installation-3)
+  - [Configuration](#configuration)
+  - [Quick start (Fiber v2)](#quick-start-fiber-v2-1)
+  - [Quick start (Fiber v3)](#quick-start-fiber-v3)
+  - [Via `setup.Builder` (recommended)](#via-setupbuilder-recommended)
+  - [Log → Sentry hook](#log--sentry-hook)
+  - [Manager integration](#manager-integration-1)
+  - [Pitfall index](#pitfall-index-1)
 - [HTTP client (`httpclient`)](#http-client-httpclient)
 - [Structured logging (`logcore` / `logfiber` / `logfiberv3`)](#structured-logging-logcore--logfiber--logfiberv3)
 
@@ -145,18 +159,20 @@ func main() {
 
 1. Register Fiber app with the Manager
 2. `apmcore.SetupOTelSDK` — OTel/APM bootstrap
-3. `logcore.New` + `logcore.SetGlobal` — structured logger
-4. Install the GORM APM plugin (`apmcore.NewGormPlugin`)
-5. `mgr.RegisterDB` — GORM pool close during `PhaseDB`
-6. `txcore.RegisterWithManager` — drain in-flight transactions before DB closes
-7. `apmcore.RegisterDBPoolMetricsWithManager` — deregister pool metric gatherer at shutdown
-8. `autobatch.RegisterWithManager` (if `WithAutobatch`/`WithAutobatchConfig` set)
-9. `db.Use(gormcache plugin)` (if `WithGORMCache`/`WithGORMCacheConfig` set; `Cacher` auto-wrapped with OTel if `WithOTel` set)
-10. go-redis closers + optional OTel instrumentation (if `WithRedis`)
-11. rueidis closers + optional OTel wrapping (if `WithRueidis`)
-12. `apmcore.RegisterWithManager` — flush OTel spans/metrics at `PhasePostDB`
-13. `apmcore.RegisterStartupMetricsWithManager` — register startup/probe metric gatherer (if `WithOTel` + `WithProcessStart`)
-14. `logcore.RegisterGlobalWithManager` — flush zap buffers last
+3. `sentrycore.SetupSentry` — Sentry bootstrap (if `WithSentry` set; no-op on empty DSN). Runs after APM so trace tags resolve and before the logger so a `SentryHook` logger core has a live client.
+4. `logcore.New` + `logcore.SetGlobal` — structured logger
+5. Install the GORM APM plugin (`apmcore.NewGormPlugin`)
+6. `mgr.RegisterDB` — GORM pool close during `PhaseDB`
+7. `txcore.RegisterWithManager` — drain in-flight transactions before DB closes
+8. `apmcore.RegisterDBPoolMetricsWithManager` — deregister pool metric gatherer at shutdown
+9. `autobatch.RegisterWithManager` (if `WithAutobatch`/`WithAutobatchConfig` set)
+10. `db.Use(gormcache plugin)` (if `WithGORMCache`/`WithGORMCacheConfig` set; `Cacher` auto-wrapped with OTel if `WithOTel` set)
+11. go-redis closers + optional OTel instrumentation (if `WithRedis`)
+12. rueidis closers + optional OTel wrapping (if `WithRueidis`)
+13. `apmcore.RegisterWithManager` — flush OTel spans/metrics at `PhasePostDB`
+14. `sentrycore.RegisterWithManager` — flush buffered Sentry events at `PhasePostDB` (if `WithSentry` set)
+15. `apmcore.RegisterStartupMetricsWithManager` — register startup/probe metric gatherer (if `WithOTel` + `WithProcessStart`)
+16. `logcore.RegisterGlobalWithManager` — flush zap buffers last
 
 ### Builder API
 
@@ -164,6 +180,7 @@ func main() {
 setup.New().
     WithLogger(logcore.Options{...}).          // create + set global logger
     WithOTel(ctx).                             // call SetupOTelSDK
+    WithSentry(ctx, sentrycore.Options{...}).  // call SetupSentry (no-op on empty DSN)
     WithGORM(db).                              // register GORM plugin, DB close, txcore
     WithAutobatchConfig(autobatch.Config{...}). // create + register autobatch plugin
     WithAutobatch(existingPlugin).             // register a pre-built autobatch plugin
@@ -200,6 +217,18 @@ WithHealthProbesV2(setup.HealthProbesConfig{
 
 `Result.Logger` is the `*logcore.Logger` created by `WithLogger` (nil if not
 set). `Result.Shutdown` is the OTel shutdown function from `SetupOTelSDK`.
+`Result.SentryShutdown` is the Sentry flush function from `WithSentry` (nil if
+not set; a no-op when the DSN is empty).
+
+To auto-report `Error`+ logs to Sentry, enable the hook on the logger — it is a
+no-op until `WithSentry` initializes a live client, so it is safe to leave on:
+
+```go
+setup.New().
+    WithSentry(ctx, sentrycore.Options{}).                       // DSN from SENTRY_DSN
+    WithLogger(logcore.Options{SentryHook: true, RedactFields: true}).
+    Build(mgr)
+```
 
 When `WithOTel` and `WithAutobatchConfig` are both set, `Build` automatically
 injects `cfg.SpanEmitter = apmcore.BatchSpanEmitter()` so batched writes appear
@@ -220,15 +249,17 @@ to compose. This section shows how they connect and what order matters.
                         │  (wires everything below in the correct order)  │
                         └───────────────────┬─────────────────────────────┘
                                             │
-     ┌──────────────┬──────────────────────┼──────────────────┬──────────────────┐
-     ▼              ▼                      ▼                  ▼                  ▼
- gsfiber/       apmfiber/             logfiber/           txctx/            gsredis/
-gsfiberv3     apmfiberv3             logfiberv3          txctxv3           gsrueidis
-     │              │                      │                  │                  │
-     ▼              ▼                      ▼                  ▼                  ▼
-  gscore         apmcore               logcore            txcore           gormcache
-     │              │                      │                  │
-     └──────────────┴──────────────────────┴──────────────────┘
+     ┌──────────────┬────────────┬──────────┼──────────────────┬──────────────────┐
+     ▼              ▼            ▼          ▼                  ▼                  ▼
+ gsfiber/       apmfiber/   sentryfiber/ logfiber/          txctx/            gsredis/
+gsfiberv3     apmfiberv3   sentryfiberv3 logfiberv3         txctxv3           gsrueidis
+     │              │            │          │                  │                  │
+     ▼              ▼            ▼          ▼                  ▼                  ▼
+  gscore         apmcore   sentrycore ──► logcore           txcore           gormcache
+     │              │  ▲          │          │                  │
+     │              └──┴──────────┘          │  (sentrycore → apmcore for trace tags;
+     │              │                        │   logcore → sentrycore for the zap hook)
+     └──────────────┴────────────────────────┴──────────────────┘
                                     │
                               go-tools (root)
                          gscore.CloserRegistrar,
@@ -2146,3 +2177,226 @@ open http://localhost:5601    # elastic / changeme
 - For foldable DB spans, the gorm plugin reassigns
   `tx.Statement.Context`; preserve it through your repositories with
   `db.WithContext(ctx)`.
+
+---
+
+## Sentry error reporting (`sentryfiber` / `sentryfiberv3`)
+
+Wraps the [Sentry Go SDK](https://docs.sentry.io/platforms/go/) into the same
+core-plus-adapter shape used by the rest of this toolbox. Its scope is
+deliberately narrow: **error and crash reporting only.** Tracing and metrics
+stay with `apmfiber`/`apmcore` (Elastic APM). The two coexist — a captured
+Sentry error carries the active APM `trace_id`/`transaction_id` as tags so you
+can jump from a Sentry issue to the matching trace in Kibana.
+
+### Packages
+
+| Submodule | Import | Purpose |
+|---|---|---|
+| `sentrycore` | `github.com/adrielcodeco/go-tools/sentrycore` | Bootstrap (no-op on empty DSN), capture helpers, APM trace correlation, HTTP breadcrumb transport, Manager closer |
+| `sentryfiber` | `github.com/adrielcodeco/go-tools/sentryfiber` | Fiber v2 recovery/error-capture middleware |
+| `sentryfiberv3` | `github.com/adrielcodeco/go-tools/sentryfiberv3` | Fiber v3 recovery/error-capture middleware |
+
+Each submodule has its own `go.mod` so projects that don't need Sentry aren't
+forced to pull the SDK.
+
+### How it relates to Elastic APM
+
+The Sentry Go SDK has **no automatic instrumentation** (unlike Python/Node,
+there is no monkey-patching). Everything is explicit. The "auto, non-invasive"
+surface this toolbox offers is three composable pieces, none of which change
+application behavior when the DSN is empty:
+
+| Concern | Elastic APM (existing) | Sentry (this module) |
+|---|---|---|
+| Request tracing / spans | ✅ `apmfiber` | ✖ (not its job) |
+| Metrics / DB pool | ✅ `apmcore` | ✖ |
+| Error events from logs | `Error` logs → Kibana APM Errors (`apmcore.WrapZapCore`) | `Error`+ logs → Sentry issues (`logcore.Options.SentryHook`) |
+| Panics / unhandled errors in HTTP | `apmfiber` middleware | `sentryfiber` middleware |
+| Outgoing HTTP context | exit spans (`apmcore.WrapHTTPTransport`) | breadcrumbs (`sentrycore.WrapHTTPTransport`) |
+| Cross-link | — | trace tags copied from APM onto every Sentry event |
+
+### Features
+
+- **No-op when disabled** — `sentrycore.SetupSentry` with an empty DSN (and no
+  `SENTRY_DSN` in the environment) returns a no-op shutdown func, reports
+  `sentrycore.Enabled() == false`, and makes every capture a cheap no-op.
+  You can ship the wiring unconditionally and turn Sentry on purely via config.
+- **Zap hook** — `logcore.Options{SentryHook: true}` stacks a `zapcore.Core`
+  that reports every log at or above `SentryLevel` (default `Error`) to Sentry.
+  Wrapped *inside* the redaction core, so secrets are masked before an event
+  leaves the process.
+- **Fiber recovery middleware** — `sentryfiber.New()` / `sentryfiberv3.New()`
+  bind a per-request hub, enrich it with the request and APM trace tags,
+  recover panics (report + respond `500`, or re-panic with `Config.Repanic`),
+  and capture errors bubbled to Fiber's `ErrorHandler`.
+- **Inline error capture** — `sentryfiber.CaptureError(c, err)` reports against
+  the current request's hub for handler-mapped errors that never bubble.
+- **HTTP breadcrumbs** — `sentrycore.WrapHTTPTransport(base)` records each
+  outgoing request as a breadcrumb; composes on top of
+  `apmcore.WrapHTTPTransport`.
+- **APM trace correlation** — `trace_id` / `transaction_id` / `span_id` from the
+  active Elastic APM transaction are attached as Sentry tags automatically.
+
+### Installation
+
+```bash
+go get github.com/adrielcodeco/go-tools/sentrycore
+go get github.com/adrielcodeco/go-tools/sentryfiber       # Fiber v2
+# or
+go get github.com/adrielcodeco/go-tools/sentryfiberv3     # Fiber v3
+```
+
+### Configuration
+
+`sentrycore.Options` is an explicit struct (matching `logcore.Options`); any
+zero field falls back to the SDK's own environment lookup, so the common case
+is env-driven:
+
+| Env var | `Options` field | Notes |
+|---|---|---|
+| `SENTRY_DSN` | `DSN` | Empty ⇒ Sentry disabled (no-op). |
+| `SENTRY_ENVIRONMENT` | `Environment` | e.g. `production`, `staging`. |
+| `SENTRY_RELEASE` | `Release` | version or git sha. |
+
+Other fields: `ServerName`, `SampleRate` (0 ⇒ 1.0), `Debug`, `Tags`
+(global tags, e.g. `service.name`), `FlushTimeout` (0 ⇒ 2s), and
+`Extra func(*sentry.ClientOptions)` for anything the struct doesn't expose
+(`BeforeSend`, custom transport, integrations).
+
+### Quick start (Fiber v2)
+
+```go
+func main() {
+    // APM first so trace tags are available to Sentry.
+    apmShutdown, _ := apmcore.SetupOTelSDK(context.Background())
+
+    // DSN/env/release read from SENTRY_* when the fields are empty.
+    sentryShutdown, err := sentrycore.SetupSentry(context.Background(), sentrycore.Options{
+        Tags: map[string]string{"service.name": "my-service"},
+    })
+    if err != nil { panic(err) }
+
+    http.DefaultTransport = sentrycore.WrapHTTPTransport(
+        apmcore.WrapHTTPTransport(http.DefaultTransport),
+    )
+
+    app := fiber.New()
+    app.Use(apmfiber.Middleware())   // must be first (starts APM transaction)
+    app.Use(sentryfiber.New())       // after APM so trace tags resolve
+
+    app.Get("/thing", func(c *fiber.Ctx) error {
+        if err := doWork(c.Context()); err != nil {
+            sentryfiber.CaptureError(c, err) // inline capture with trace tags
+            return c.SendStatus(500)
+        }
+        return c.SendStatus(200)
+    })
+
+    go app.Listen(":8080")
+    // ... on shutdown ...
+    _ = sentryShutdown(context.Background()) // flush buffered events
+    _ = apmShutdown(context.Background())
+}
+```
+
+### Quick start (Fiber v3)
+
+Identical shape; use the v3 packages and the value-receiver handler signature:
+
+```go
+app := fiber.New()
+app.Use(apmfiberv3.Middleware())
+app.Use(sentryfiberv3.New())
+
+app.Get("/thing", func(c fiber.Ctx) error {
+    if err := doWork(c.Context()); err != nil {
+        sentryfiberv3.CaptureError(c, err)
+        return c.SendStatus(500)
+    }
+    return c.SendStatus(200)
+})
+```
+
+### Via `setup.Builder` (recommended)
+
+`WithSentry` initializes Sentry (after APM, before the logger) and registers
+the flush as a `PhasePostDB` closer. Enable `SentryHook` on the logger to also
+report `Error`+ logs:
+
+```go
+res, err := setup.New().
+    WithOTel(ctx).
+    WithSentry(ctx, sentrycore.Options{
+        Tags: map[string]string{"service.name": "my-service"},
+    }).
+    WithLogger(logcore.Options{
+        Service:      "my-service",
+        SentryHook:   true,   // Error+ logs → Sentry
+        RedactFields: true,   // mask secrets before they reach Sentry
+    }).
+    WithGORM(db).
+    WithFiberV2(app).
+    Build(mgr)
+
+// res.SentryShutdown is the flush func (no-op when DSN is empty).
+app.Use(apmfiber.Middleware())
+app.Use(sentryfiber.New())
+```
+
+Because everything is a no-op when the DSN is empty, this exact wiring is safe
+in every environment — Sentry simply activates wherever `SENTRY_DSN` is set.
+
+### Log → Sentry hook
+
+With `SentryHook: true`, a call like the following produces both a normal log
+line **and** a Sentry event, grouped by the error's type and tagged with the
+request's trace id:
+
+```go
+logcore.LogCtx(ctx).Error("charge failed",
+    zap.String("wallet_id", walletID),
+    zap.Error(err),            // ← promoted to the Sentry exception
+)
+```
+
+Fields whose key is `trace.id` / `transaction.id` / `span.id` are promoted to
+Sentry tags; the rest land in the event's `log` context. When a `zap.Error`
+field is present it is captured as the exception so issues group by error type
+rather than by message.
+
+> **Avoid double-reporting:** if you also use `apmcore.WrapZapCore` (the
+> logcore default), an `Error` log already becomes an APM error doc *and* — with
+> the hook on — a Sentry event. That is intended (two systems, two purposes).
+> But at a central error-handler that also calls `apmfiber.CaptureError`, log at
+> `Warn` (not `Error`) to avoid a duplicate Sentry issue for the same failure.
+
+### Manager integration
+
+`sentrycore` ships a helper to register the flush with the graceful-shutdown
+Manager without importing `gscore` directly:
+
+```go
+sentryShutdown, _ := sentrycore.SetupSentry(ctx, opts)
+
+// Flush buffered events after the DB pool closes (PhasePostDB).
+sentrycore.RegisterWithManager(sentryShutdown, mgr, int(gscore.PhasePostDB), 0)
+```
+
+`phase=0` defaults to `PhasePostDB`; `timeout=0` defaults to 5s.
+
+### Pitfall index
+
+- **No auto-instrumentation in Go** — there is nothing to "enable" beyond the
+  three pieces above (zap hook, Fiber middleware, HTTP transport). Adding the
+  DSN alone captures nothing on its own.
+- **Order matters** — put `sentryfiber.New()` *after* `apmfiber.Middleware()`;
+  otherwise the APM transaction isn't on the context yet and events won't carry
+  trace tags. In `setup.Builder`, `WithSentry` already runs after `WithOTel`.
+- **Empty DSN is not an error** — `SetupSentry` returns `(noop, nil)`. Check
+  `sentrycore.Enabled()` if you need to branch on it.
+- **Flush on shutdown** — Sentry delivers asynchronously; call the returned
+  shutdown func (or use `WithSentry`, which registers it) or you will drop the
+  last events on exit.
+- **Redaction** — enable `logcore.Options.RedactFields` alongside `SentryHook`
+  so sensitive field values are masked before the event is built.

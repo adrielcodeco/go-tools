@@ -32,6 +32,7 @@ import (
 	"github.com/adrielcodeco/go-tools/gsfiber"
 	"github.com/adrielcodeco/go-tools/gsfiberv3"
 	"github.com/adrielcodeco/go-tools/logcore"
+	"github.com/adrielcodeco/go-tools/sentrycore"
 	"github.com/adrielcodeco/go-tools/txcore"
 )
 
@@ -58,6 +59,8 @@ type rueidisEntry struct {
 type Builder struct {
 	loggerOpts      *logcore.Options
 	otelCtx         *context.Context
+	sentryCtx       *context.Context
+	sentryOpts      *sentrycore.Options
 	gormDB          *gorm.DB
 	autobatchP      *autobatch.Plugin
 	autobatchCfg    *autobatch.Config
@@ -82,6 +85,9 @@ type Result struct {
 	// Shutdown is the OTel/APM shutdown function registered by WithOTel; nil
 	// if not configured.
 	Shutdown apmcore.ShutdownFunc
+	// SentryShutdown is the Sentry flush function registered by WithSentry;
+	// nil if not configured. When the DSN is empty it is a no-op.
+	SentryShutdown sentrycore.ShutdownFunc
 }
 
 // New returns an empty Builder.
@@ -100,6 +106,21 @@ func (b *Builder) WithLogger(opts logcore.Options) *Builder {
 // Build. ctx is typically the application root context or context.Background().
 func (b *Builder) WithOTel(ctx context.Context) *Builder {
 	b.otelCtx = &ctx
+	return b
+}
+
+// WithSentry configures the builder to initialize Sentry error reporting via
+// sentrycore.SetupSentry(ctx, opts) during Build and to register its flush
+// function as a shutdown closer.
+//
+// It runs before WithLogger so that, when logcore.Options.SentryHook is set,
+// the Sentry client is already live when the logger's Sentry core is wired.
+// An empty opts.DSN (and no SENTRY_DSN in the environment) leaves Sentry
+// disabled: setup completes normally and every capture is a no-op, so this
+// option is safe to call unconditionally and toggle via configuration.
+func (b *Builder) WithSentry(ctx context.Context, opts sentrycore.Options) *Builder {
+	b.sentryCtx = &ctx
+	b.sentryOpts = &opts
 	return b
 }
 
@@ -274,7 +295,7 @@ func (b *Builder) WithHealthProbesV3(cfg HealthProbesConfig) *Builder {
 // Build wires all configured components onto mgr in the required order:
 //
 //  0. gsfiber.RegisterApp / gsfiberv3.RegisterApp          (if WithFiberV2 / WithFiberV3)
-//  0a. liveness + readiness + startup probe routes         (if WithHealthProbesV2 / WithHealthProbesV3)
+//     0a. liveness + readiness + startup probe routes         (if WithHealthProbesV2 / WithHealthProbesV3)
 //  1. apmcore.SetupOTelSDK                                 (if WithOTel)
 //  2. logcore.New + logcore.SetGlobal                      (if WithLogger)
 //  3. apmcore.NewGormPlugin via db.Use                     (if WithGORM + WithOTel)
@@ -282,7 +303,7 @@ func (b *Builder) WithHealthProbesV3(cfg HealthProbesConfig) *Builder {
 //  5. txcore.RegisterWithManager                           (if WithGORM)
 //  6. apmcore.RegisterDBPoolMetricsWithManager             (if WithGORM + WithOTel)
 //  7. autobatch.RegisterWithManager                        (if WithAutobatch or WithAutobatchConfig)
-//  7b. gormcache plugin via db.Use                         (if WithGORMCache or WithGORMCacheConfig)
+//     7b. gormcache plugin via db.Use                         (if WithGORMCache or WithGORMCacheConfig)
 //  8. go-redis closers + optional OTel hooks               (if WithRedis)
 //  9. rueidis closers + optional OTel wrapping             (if WithRueidis)
 //  10. apmcore.RegisterWithManager                         (if WithOTel)
@@ -346,6 +367,16 @@ func (b *Builder) build(mgr registrar) (*Result, error) {
 			return nil, err
 		}
 		res.Shutdown = shutdown
+	}
+
+	// 1b. Sentry — after APM (so trace tags resolve) and before the logger
+	// (so a SentryHook logger core has a live client). No-op on empty DSN.
+	if b.sentryCtx != nil && b.sentryOpts != nil {
+		shutdown, err := sentrycore.SetupSentry(*b.sentryCtx, *b.sentryOpts)
+		if err != nil {
+			return nil, err
+		}
+		res.SentryShutdown = shutdown
 	}
 
 	// 2. Logger — set global so subsequent registrations can log.
@@ -459,6 +490,11 @@ func (b *Builder) build(mgr registrar) (*Result, error) {
 	// 9. OTel shutdown — flush spans and metrics after DB is closed.
 	if res.Shutdown != nil {
 		apmcore.RegisterWithManager(res.Shutdown, mgr, int(gscore.PhasePostDB), 15*time.Second)
+	}
+
+	// 9b. Sentry flush — deliver buffered events after DB is closed.
+	if res.SentryShutdown != nil {
+		sentrycore.RegisterWithManager(res.SentryShutdown, mgr, int(gscore.PhasePostDB), 5*time.Second)
 	}
 
 	// 10. Logger sync — flush log buffers last so shutdown logs are not lost.

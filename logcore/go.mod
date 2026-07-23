@@ -8,19 +8,22 @@ require (
 	github.com/adrielcodeco/go-tools/apmcore v0.0.0
 	github.com/adrielcodeco/go-tools/gormautobatch v0.0.0
 	github.com/adrielcodeco/go-tools/httpclient v0.0.0
+	github.com/adrielcodeco/go-tools/sentrycore v0.0.0
 	github.com/bytedance/sonic v1.15.1
+	github.com/getsentry/sentry-go v0.48.0
 	go.elastic.co/apm/v2 v2.7.1
 	go.uber.org/zap v1.27.0
 )
 
 require (
+	github.com/adrielcodeco/go-tools/gormcache v0.0.0 // indirect
 	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/armon/go-radix v1.0.0 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic/loader v0.5.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
-	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/elastic/go-sysinfo v1.7.1 // indirect
 	github.com/elastic/go-windows v1.0.1 // indirect
@@ -34,7 +37,7 @@ require (
 	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/procfs v0.7.3 // indirect
 	github.com/redis/go-redis/extra/rediscmd/v9 v9.16.0 // indirect
 	github.com/redis/go-redis/extra/redisotel/v9 v9.16.0 // indirect
@@ -58,8 +61,8 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
-	golang.org/x/sys v0.43.0 // indirect
-	golang.org/x/text v0.36.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/gorm v1.30.0 // indirect
 	howett.net/plist v1.0.0 // indirect
@@ -69,5 +72,7 @@ replace (
 	github.com/adrielcodeco/go-tools => ../
 	github.com/adrielcodeco/go-tools/apmcore => ../apmcore
 	github.com/adrielcodeco/go-tools/gormautobatch => ../gormautobatch
+	github.com/adrielcodeco/go-tools/gormcache => ../gormcache
 	github.com/adrielcodeco/go-tools/httpclient => ../httpclient
+	github.com/adrielcodeco/go-tools/sentrycore => ../sentrycore
 )
