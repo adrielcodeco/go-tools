@@ -87,12 +87,12 @@ func CaptureError(c fiber.Ctx, err error) {
 func requestContext(c fiber.Ctx) map[string]any {
 	headers := make(map[string]string)
 	c.RequestCtx().Request.Header.VisitAll(func(key, value []byte) {
-		headers[string(key)] = string(value)
+		headers[string(key)] = sentrycore.RedactHeader(string(key), string(value))
 	})
 	return map[string]any{
 		"method":       c.Method(),
 		"url":          c.OriginalURL(),
-		"query_string": string(c.RequestCtx().URI().QueryString()),
+		"query_string": sentrycore.RedactQueryString(string(c.RequestCtx().URI().QueryString())),
 		"headers":      headers,
 	}
 }

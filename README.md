@@ -2237,6 +2237,12 @@ application behavior when the DSN is empty:
   `apmcore.WrapHTTPTransport`.
 - **APM trace correlation** — `trace_id` / `transaction_id` / `span_id` from the
   active Elastic APM transaction are attached as Sentry tags automatically.
+- **Header / query redaction** — the Fiber middleware attaches the request's
+  headers and query string to the event, but sensitive headers
+  (`Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, …) and credential-like
+  query params (`access_token`, `password`, `code`, …) are replaced with
+  `[Filtered]` via `sentrycore.RedactHeader` / `sentrycore.RedactQueryString`
+  before the event leaves the process.
 
 ### Installation
 
@@ -2399,4 +2405,8 @@ sentrycore.RegisterWithManager(sentryShutdown, mgr, int(gscore.PhasePostDB), 0)
   shutdown func (or use `WithSentry`, which registers it) or you will drop the
   last events on exit.
 - **Redaction** — enable `logcore.Options.RedactFields` alongside `SentryHook`
-  so sensitive field values are masked before the event is built.
+  so sensitive log field values are masked before the event is built. The Fiber
+  middleware redacts sensitive request headers and query params on its own
+  (`sentrycore.RedactHeader` / `RedactQueryString`); extend the denylists in
+  `sentrycore/redact.go` if your app uses non-standard credential header/param
+  names.
