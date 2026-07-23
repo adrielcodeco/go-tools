@@ -2274,6 +2274,9 @@ Other fields: `ServerName`, `SampleRate` (0 ⇒ 1.0), `Debug`, `Tags`
 
 ### Quick start (Fiber v2)
 
+Compile-checked, copy-pasteable versions of every snippet below live in
+[`examples/sentry_scenarios.go`](examples/sentry_scenarios.go).
+
 ```go
 func main() {
     // APM first so trace tags are available to Sentry.
@@ -2395,9 +2398,29 @@ sentrycore.RegisterWithManager(sentryShutdown, mgr, int(gscore.PhasePostDB), 0)
 
 ### Sharing a custom redactor
 
-The header/query redaction and the log-field redaction use the **same type**
-(`logcore.Redactor`), but they are **separate instances** unless you connect
-them. There are two ways to extend the denylist, with different reach:
+The header/query redaction (Fiber middleware) and the log-field redaction use
+the **same type** (`logcore.Redactor`), but they are **separate instances**
+unless you connect them. So "I added a pattern to the log redactor" does **not**
+automatically mean Sentry masks it too — it depends on *how* you added it:
+
+| How you extend the denylist | Logs | Sentry (headers/query) | Sentry (log hook) |
+|---|---|---|---|
+| Mutate globals `logcore.DefaultSensitiveKeys` / `DefaultSensitivePatterns` | ✅ | ✅ | ✅ |
+| Custom `Redactor` shared with middleware (`Config.Redactor` / `Result.Redactor`) | ✅ | ✅ | ✅ |
+| Custom `Redactor` passed **only** to `logcore.Options.Redactor` | ✅ | ❌ **leaks** | ✅ |
+| Nothing (defaults) | ✅ | ✅ | ✅ |
+
+The **log hook** column always reflects your custom redactor because the hook
+core is wrapped *inside* the redact core (fields are masked before Sentry sees
+them). The gap is the **middleware**: it holds its own `Redactor`, so a custom
+one reaches it only via `Config.Redactor` (or `Result.Redactor` from `setup`).
+
+Runnable versions of all three rows are in
+[`examples/sentry_scenarios.go`](examples/sentry_scenarios.go)
+(`sentryRedactSharedGlobals`, `sentryRedactSharedCustomInstance`,
+`sentryRedactNotSharedPitfall`).
+
+There are two ways to extend the denylist, with different reach:
 
 **1. Extend the global defaults** — mutate the exported slices before building
 anything. This reflects everywhere automatically (logs, log middleware, Sentry

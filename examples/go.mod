@@ -11,6 +11,34 @@ require (
 )
 
 require (
+	github.com/adrielcodeco/go-tools/gormautobatch v0.0.0 // indirect
+	github.com/adrielcodeco/go-tools/gormcache v0.0.0 // indirect
+	github.com/adrielcodeco/go-tools/gsfiberv3 v0.0.0 // indirect
+	github.com/adrielcodeco/go-tools/httpclient v0.0.0 // indirect
+	github.com/bytedance/gopkg v0.1.3 // indirect
+	github.com/bytedance/sonic v1.15.1 // indirect
+	github.com/bytedance/sonic/loader v0.5.1 // indirect
+	github.com/cloudwego/base64x v0.1.6 // indirect
+	github.com/getsentry/sentry-go v0.48.0 // indirect
+	github.com/gofiber/fiber/v3 v3.2.0 // indirect
+	github.com/gofiber/schema v1.7.1 // indirect
+	github.com/gofiber/utils/v2 v2.0.4 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
+	github.com/philhofer/fwd v1.2.0 // indirect
+	github.com/redis/rueidis v1.0.75 // indirect
+	github.com/redis/rueidis/rueidisotel v1.0.75 // indirect
+	github.com/tinylib/msgp v1.6.4 // indirect
+	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
+	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
+	golang.org/x/crypto v0.50.0 // indirect
+	golang.org/x/net v0.53.0 // indirect
+)
+
+require (
+	github.com/adrielcodeco/go-tools/logcore v0.0.0
+	github.com/adrielcodeco/go-tools/sentrycore v0.0.0
+	github.com/adrielcodeco/go-tools/sentryfiber v0.0.0
+	github.com/adrielcodeco/go-tools/setup v0.0.0
 	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/armon/go-radix v1.0.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -43,16 +71,16 @@ require (
 	go.elastic.co/apm/module/apmzap/v2 v2.7.1 // indirect
 	go.elastic.co/apm/v2 v2.7.1 // indirect
 	go.elastic.co/fastjson v1.5.1 // indirect
-	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
-	go.opentelemetry.io/otel v1.38.0 // indirect
-	go.opentelemetry.io/otel/metric v1.38.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.38.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.38.0 // indirect
-	go.opentelemetry.io/otel/trace v1.38.0 // indirect
+	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
+	go.opentelemetry.io/otel v1.43.0 // indirect
+	go.opentelemetry.io/otel/metric v1.43.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.43.0 // indirect
+	go.opentelemetry.io/otel/sdk/metric v1.43.0 // indirect
+	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
-	golang.org/x/text v0.36.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	howett.net/plist v1.0.0 // indirect
 )
 
@@ -60,4 +88,15 @@ replace (
 	github.com/adrielcodeco/go-tools => ../
 	github.com/adrielcodeco/go-tools/apmcore => ../apmcore
 	github.com/adrielcodeco/go-tools/apmfiber => ../apmfiber
+	github.com/adrielcodeco/go-tools/gormautobatch => ../gormautobatch
+	github.com/adrielcodeco/go-tools/gormcache => ../gormcache
+	github.com/adrielcodeco/go-tools/gsfiberv3 => ../gsfiberv3
+	github.com/adrielcodeco/go-tools/gsredis => ../gsredis
+	github.com/adrielcodeco/go-tools/gsrueidis => ../gsrueidis
+	github.com/adrielcodeco/go-tools/httpclient => ../httpclient
+	github.com/adrielcodeco/go-tools/logcore => ../logcore
+	github.com/adrielcodeco/go-tools/sentrycore => ../sentrycore
+	github.com/adrielcodeco/go-tools/sentryfiber => ../sentryfiber
+	github.com/adrielcodeco/go-tools/sentryfiberv3 => ../sentryfiberv3
+	github.com/adrielcodeco/go-tools/setup => ../setup
 )
