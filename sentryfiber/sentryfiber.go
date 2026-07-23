@@ -26,6 +26,7 @@ import (
 
 	sentry "github.com/getsentry/sentry-go"
 
+	"github.com/adrielcodeco/go-tools/logcore"
 	"github.com/adrielcodeco/go-tools/sentrycore"
 )
 
@@ -39,6 +40,15 @@ type Config struct {
 	// WaitForDelivery blocks the response until the event is delivered.
 	// Default false (events are flushed asynchronously / at shutdown).
 	WaitForDelivery bool
+
+	// Redactor masks sensitive request headers and query params before they
+	// are attached to the Sentry event. Nil uses logcore.DefaultRedactor()
+	// so the Sentry payload shares the exact policy applied to the logs.
+	//
+	// Pass the SAME *logcore.Redactor you gave logcore.Options.Redactor so a
+	// custom denylist reflects in both places. setup.Builder does this
+	// automatically when WithSentry and WithLogger are both configured.
+	Redactor *logcore.Redactor
 }
 
 // New returns the middleware with default Config.
@@ -46,11 +56,15 @@ func New() fiber.Handler { return NewWithConfig(Config{}) }
 
 // NewWithConfig returns the middleware configured by cfg.
 func NewWithConfig(cfg Config) fiber.Handler {
+	red := cfg.Redactor
+	if red == nil {
+		red = logcore.DefaultRedactor()
+	}
 	return func(c *fiber.Ctx) (err error) {
 		// Clone the current hub for this request so scope mutations don't
 		// leak across concurrent requests.
 		hub := sentry.CurrentHub().Clone()
-		hub.Scope().SetContext("request", requestContext(c))
+		hub.Scope().SetContext("request", requestContext(c, red))
 		if tags := sentrycore.CaptureFields(c.Context()); len(tags) > 0 {
 			hub.Scope().SetTags(tags)
 		}

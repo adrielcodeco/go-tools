@@ -9,9 +9,22 @@ require (
 )
 
 require (
+	github.com/adrielcodeco/go-tools/gormautobatch v0.0.0 // indirect
+	github.com/adrielcodeco/go-tools/httpclient v0.0.0 // indirect
+	github.com/bytedance/gopkg v0.1.3 // indirect
+	github.com/bytedance/sonic v1.15.1 // indirect
+	github.com/bytedance/sonic/loader v0.5.1 // indirect
+	github.com/cloudwego/base64x v0.1.6 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
+	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
+	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
+)
+
+require (
 	github.com/adrielcodeco/go-tools v0.0.0 // indirect
 	github.com/adrielcodeco/go-tools/apmcore v0.0.0 // indirect
 	github.com/adrielcodeco/go-tools/gormcache v0.0.0 // indirect
+	github.com/adrielcodeco/go-tools/logcore v0.0.0
 	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/armon/go-radix v1.0.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -37,7 +50,7 @@ require (
 	github.com/redis/rueidis/rueidisotel v1.0.75 // indirect
 	github.com/rivo/uniseg v0.2.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
-	github.com/valyala/fasthttp v1.71.0 // indirect
+	github.com/valyala/fasthttp v1.71.0
 	go.elastic.co/apm/module/apmhttp/v2 v2.7.1 // indirect
 	go.elastic.co/apm/module/apmotel/v2 v2.7.1 // indirect
 	go.elastic.co/apm/module/apmsql/v2 v2.7.1 // indirect
@@ -61,6 +74,9 @@ require (
 replace (
 	github.com/adrielcodeco/go-tools => ../
 	github.com/adrielcodeco/go-tools/apmcore => ../apmcore
+	github.com/adrielcodeco/go-tools/gormautobatch => ../gormautobatch
 	github.com/adrielcodeco/go-tools/gormcache => ../gormcache
+	github.com/adrielcodeco/go-tools/httpclient => ../httpclient
+	github.com/adrielcodeco/go-tools/logcore => ../logcore
 	github.com/adrielcodeco/go-tools/sentrycore => ../sentrycore
 )

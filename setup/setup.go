@@ -88,6 +88,16 @@ type Result struct {
 	// SentryShutdown is the Sentry flush function registered by WithSentry;
 	// nil if not configured. When the DSN is empty it is a no-op.
 	SentryShutdown sentrycore.ShutdownFunc
+	// Redactor is the secret-masking policy resolved from WithLogger — the
+	// custom logcore.Options.Redactor if one was set, otherwise
+	// logcore.DefaultRedactor(). Pass it to the Sentry Fiber middleware so
+	// it redacts request headers/query with the SAME policy as the logs:
+	//
+	//	app.Use(sentryfiber.NewWithConfig(sentryfiber.Config{Redactor: res.Redactor}))
+	//
+	// Non-nil whenever WithLogger was called; nil otherwise (the middleware
+	// then falls back to logcore.DefaultRedactor() on its own).
+	Redactor *logcore.Redactor
 }
 
 // New returns an empty Builder.
@@ -387,6 +397,13 @@ func (b *Builder) build(mgr registrar) (*Result, error) {
 		}
 		logcore.SetGlobal(l)
 		res.Logger = l
+		// Expose the resolved redactor so the Sentry Fiber middleware can
+		// mask request headers/query with the same policy as the logs.
+		if b.loggerOpts.Redactor != nil {
+			res.Redactor = b.loggerOpts.Redactor
+		} else {
+			res.Redactor = logcore.DefaultRedactor()
+		}
 	}
 
 	// 3. GORM OTel plugin — install before any txcore/autobatch registration so

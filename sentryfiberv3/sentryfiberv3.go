@@ -16,11 +16,13 @@
 package sentryfiberv3
 
 import (
+	"net/url"
 	"time"
 
 	sentry "github.com/getsentry/sentry-go"
 	"github.com/gofiber/fiber/v3"
 
+	"github.com/adrielcodeco/go-tools/logcore"
 	"github.com/adrielcodeco/go-tools/sentrycore"
 )
 
@@ -30,6 +32,12 @@ const defaultFlushTimeout = 2 * time.Second
 type Config struct {
 	Repanic         bool
 	WaitForDelivery bool
+
+	// Redactor masks sensitive request headers and query params before they
+	// reach Sentry. Nil uses logcore.DefaultRedactor(); pass the same
+	// *logcore.Redactor given to logcore.Options.Redactor so a custom
+	// denylist reflects in both. setup.Builder wires this automatically.
+	Redactor *logcore.Redactor
 }
 
 // New returns the middleware with default Config.
@@ -37,9 +45,13 @@ func New() fiber.Handler { return NewWithConfig(Config{}) }
 
 // NewWithConfig returns the middleware configured by cfg.
 func NewWithConfig(cfg Config) fiber.Handler {
+	red := cfg.Redactor
+	if red == nil {
+		red = logcore.DefaultRedactor()
+	}
 	return func(c fiber.Ctx) (err error) {
 		hub := sentry.CurrentHub().Clone()
-		hub.Scope().SetContext("request", requestContext(c))
+		hub.Scope().SetContext("request", requestContext(c, red))
 		// APM stores its transaction on c.RequestCtx() in Fiber v3.
 		if tags := sentrycore.CaptureFields(c.RequestCtx()); len(tags) > 0 {
 			hub.Scope().SetTags(tags)
@@ -84,15 +96,44 @@ func CaptureError(c fiber.Ctx, err error) {
 // requestContext builds the "request" context map attached to the Sentry
 // scope. It avoids materializing a *http.Request (Fiber runs on fasthttp)
 // and skips the body.
-func requestContext(c fiber.Ctx) map[string]any {
+func requestContext(c fiber.Ctx, red *logcore.Redactor) map[string]any {
 	headers := make(map[string]string)
 	c.RequestCtx().Request.Header.VisitAll(func(key, value []byte) {
-		headers[string(key)] = sentrycore.RedactHeader(string(key), string(value))
+		headers[string(key)] = string(value)
 	})
 	return map[string]any{
 		"method":       c.Method(),
 		"url":          c.OriginalURL(),
-		"query_string": sentrycore.RedactQueryString(string(c.RequestCtx().URI().QueryString())),
-		"headers":      headers,
+		"query_string": redactQueryString(red, string(c.RequestCtx().URI().QueryString())),
+		"headers":      red.Value(headers),
 	}
+}
+
+// redactQueryString parses raw and masks the values of sensitive query
+// parameters using red, preserving parameter names. An unparseable query is
+// dropped rather than risk leaking it.
+func redactQueryString(red *logcore.Redactor, raw string) string {
+	if raw == "" {
+		return ""
+	}
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return ""
+	}
+	for k, vs := range values {
+		masked, ok := red.Value(map[string]string{k: firstOrEmpty(vs)}).(map[string]string)
+		if ok && masked[k] != firstOrEmpty(vs) {
+			for i := range vs {
+				vs[i] = masked[k]
+			}
+		}
+	}
+	return values.Encode()
+}
+
+func firstOrEmpty(vs []string) string {
+	if len(vs) == 0 {
+		return ""
+	}
+	return vs[0]
 }

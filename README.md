@@ -90,6 +90,7 @@ Each trio shares a framework-agnostic engine (`txcore`, `gscore`, `apmcore`, `se
   - [Via `setup.Builder` (recommended)](#via-setupbuilder-recommended)
   - [Log → Sentry hook](#log--sentry-hook)
   - [Manager integration](#manager-integration-1)
+  - [Sharing a custom redactor](#sharing-a-custom-redactor)
   - [Pitfall index](#pitfall-index-1)
 - [HTTP client (`httpclient`)](#http-client-httpclient)
 - [Structured logging (`logcore` / `logfiber` / `logfiberv3`)](#structured-logging-logcore--logfiber--logfiberv3)
@@ -2238,11 +2239,12 @@ application behavior when the DSN is empty:
 - **APM trace correlation** — `trace_id` / `transaction_id` / `span_id` from the
   active Elastic APM transaction are attached as Sentry tags automatically.
 - **Header / query redaction** — the Fiber middleware attaches the request's
-  headers and query string to the event, but sensitive headers
-  (`Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, …) and credential-like
-  query params (`access_token`, `password`, `code`, …) are replaced with
-  `[Filtered]` via `sentrycore.RedactHeader` / `sentrycore.RedactQueryString`
-  before the event leaves the process.
+  headers and query string to the event, but sensitive values are masked first
+  by a `logcore.Redactor` — the same type that redacts the structured logs
+  (auth headers, tokens, `card`/`pan`/`cvv`, `ssn`, … with substring matching).
+  It defaults to `logcore.DefaultRedactor()`; set `Config.Redactor` (or use
+  `setup`, which wires it automatically) to share a **custom** denylist between
+  logs and Sentry. See [Sharing a custom redactor](#sharing-a-custom-redactor).
 
 ### Installation
 
@@ -2391,6 +2393,51 @@ sentrycore.RegisterWithManager(sentryShutdown, mgr, int(gscore.PhasePostDB), 0)
 
 `phase=0` defaults to `PhasePostDB`; `timeout=0` defaults to 5s.
 
+### Sharing a custom redactor
+
+The header/query redaction and the log-field redaction use the **same type**
+(`logcore.Redactor`), but they are **separate instances** unless you connect
+them. There are two ways to extend the denylist, with different reach:
+
+**1. Extend the global defaults** — mutate the exported slices before building
+anything. This reflects everywhere automatically (logs, log middleware, Sentry
+middleware), because `logcore.DefaultRedactor()` reads them:
+
+```go
+logcore.DefaultSensitiveKeys = append(logcore.DefaultSensitiveKeys, "x-tenant-secret")
+logcore.DefaultSensitivePatterns = append(logcore.DefaultSensitivePatterns, "passphrase")
+```
+
+**2. Pass a custom `Redactor`** — the idiomatic way, without touching globals.
+A custom redactor given only to the logger does **NOT** reach Sentry on its
+own; you must pass the same instance to the middleware. Build it once and share:
+
+```go
+red := logcore.NewRedactor(logcore.RedactorOptions{
+    Extra:    []string{"x-tenant-secret"},   // add to the default keys
+    Patterns: append(logcore.DefaultSensitivePatterns, "passphrase"),
+})
+
+app.Use(sentryfiber.NewWithConfig(sentryfiber.Config{Redactor: red}))
+setup.New().
+    WithLogger(logcore.Options{RedactFields: true, Redactor: red}).
+    // ...
+```
+
+**Via `setup` (recommended)** — you don't have to thread it manually.
+`Build` exposes the logger's effective redactor on `Result.Redactor` (the
+custom one if set, else the default). Hand it to the middleware:
+
+```go
+res, _ := setup.New().
+    WithSentry(ctx, sentrycore.Options{}).
+    WithLogger(logcore.Options{RedactFields: true, Redactor: red}).
+    Build(mgr)
+
+app.Use(apmfiber.Middleware())
+app.Use(sentryfiber.NewWithConfig(sentryfiber.Config{Redactor: res.Redactor}))
+```
+
 ### Pitfall index
 
 - **No auto-instrumentation in Go** — there is nothing to "enable" beyond the
@@ -2406,7 +2453,8 @@ sentrycore.RegisterWithManager(sentryShutdown, mgr, int(gscore.PhasePostDB), 0)
   last events on exit.
 - **Redaction** — enable `logcore.Options.RedactFields` alongside `SentryHook`
   so sensitive log field values are masked before the event is built. The Fiber
-  middleware redacts sensitive request headers and query params on its own
-  (`sentrycore.RedactHeader` / `RedactQueryString`); extend the denylists in
-  `sentrycore/redact.go` if your app uses non-standard credential header/param
-  names.
+  middleware redacts request headers/query with a `logcore.Redactor`
+  (default: `logcore.DefaultRedactor()`). A **custom** redactor passed only to
+  the logger does not reach the middleware — share the instance via
+  `Config.Redactor` / `Result.Redactor`. See
+  [Sharing a custom redactor](#sharing-a-custom-redactor).
